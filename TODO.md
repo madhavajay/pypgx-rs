@@ -615,4 +615,38 @@ Of the ~22 non-Beagle deferred functions:
   no Rust trainer reproduces PyPGx's shipped models. Use convert + `predict_cnv` instead.
 - **Upstream-dependency blocked (1):** `create_input_vcf` — needs `bcftools call`
   in bcftools-rs (blocker #1).
-- **Deferred by design (1):** `estimate_phase_beagle` → `beagle-rs`.
+- **Deferred by design (1):** `estimate_phase_beagle` → `beagle-rs` (see §14).
+
+## 14. Beagle integration plan (`repos/beagle-rs`, in progress)
+
+`beagle-rs` (vendored at `repos/beagle-rs`, branch `main`) is a from-scratch
+Rust port of Beagle 5.5 — **early** (porting the `vcf` module). Its own
+Definition of Done includes "replace the `estimate_phase_beagle` NotPorted stub
+in pypgx-rs and pass pypgx's tests," so the target is mutual.
+
+**Integration contract** (from `utils.estimate_phase_beagle`): input is a
+`VcfFrame[Imported]`; PyPGx writes a temp `input.vcf` and runs
+`java -Xmx2g -jar beagle.jar gt=input.vcf chrom=<region> ref=<panel>
+out=output impute=<bool> em=<bool>`, then reads `output.vcf.gz` →
+`VcfFrame[Phased]` (metadata `SemanticType=VcfFrame[Phased]`, `Program=Beagle`),
+with: an EM-retry fallback (`em=true` then `em=false` on error), chr-prefix
+add/remove around the panel, a single-marker guard, and `Platform=='Chip'` GSA
+allele filtering. The beagle-rs binary is a **drop-in** for the jar (same
+`gt=/chrom=/ref=/out=/impute=/em=` args → same `output.vcf.gz`).
+
+**When beagle-rs's DoD is met:** replace the `estimate_phase_beagle` `NotPorted`
+stub in `src/external.rs` with a real impl behind a `beagle` feature: write the
+imported VcfFrame to a temp `input.vcf`, invoke the `beagle-rs` binary
+(`repos/beagle-rs` `beagle-rs-cli`) with the same args + EM-retry, read back
+`output.vcf.gz` via `VcfFrame::from_string`, and return the `[Phased]` archive.
+The `run_chip`/`run_ngs` pipelines then run end-to-end on unphased input.
+
+**Caveats to reconcile before claiming byte-parity:**
+1. **Beagle version mismatch** — PyPGx bundles `beagle.22Jul22.46e.jar`; beagle-rs
+   targets `27Feb25.75f`. Phasing output can differ across Beagle versions, so a
+   straight swap may not byte-match PyPGx's reference. Either point beagle-rs at
+   the 22Jul22 behavior or accept/verify against 27Feb25.
+2. **Reference panel** — needs the 1KGP panel from `pypgx-bundle`
+   (`1kgp/<assembly>/<gene>.vcf.gz`), not present here.
+3. Read `output.vcf.gz` requires **bgzf** decode (noodles-bgzf) on the Rust side,
+   or have beagle-rs emit plain VCF for the wrapper.

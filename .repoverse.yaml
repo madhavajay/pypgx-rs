@@ -37,8 +37,14 @@ projects:
 - name: madhavajay/sklears
   path: repos/sklears
   revision: master
+# Rust port of Beagle 5.5 (statistical phasing/imputation) — in progress; will
+# replace the estimate_phase_beagle NotPorted stub once its port completes.
+- name: madhavajay/beagle-rs
+  path: repos/beagle-rs
+  revision: main
 provides:
 - madhavajay/pypgx
+- madhavajay/beagle-rs
 - madhavajay/samtools-rs
 - madhavajay/bcftools-rs
 - madhavajay/htslib-rs

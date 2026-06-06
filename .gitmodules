@@ -13,3 +13,7 @@
 	path = repos/sklears
 	url = git@github.com:madhavajay/sklears.git
 	branch = master
+[submodule "repos/beagle-rs"]
+	path = repos/beagle-rs
+	url = git@github.com:madhavajay/beagle-rs.git
+	branch = main
