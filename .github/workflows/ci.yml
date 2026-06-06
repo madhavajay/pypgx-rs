@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, "feat/**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust port — cargo test (43 parity/breadth/pipeline tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The default test suite needs no submodules — ground-truth fixtures are
+      # committed under tests/fixtures/.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --verbose
+      - name: cargo build --features plots (ruviz)
+        run: cargo build --features plots
+
+  differential:
+    name: Differential parity — Python PyPGx generates truth, Rust verifies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize PyPGx reference submodule
+        run: git submodule update --init repos/pypgx
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install PyPGx reference + deps
+        run: pip install ./repos/pypgx fuc scikit-learn
+      - name: Regenerate ground truth from Python; confirm committed fixtures are current
+        run: |
+          python tools/gen_truth.py  > tests/fixtures/truth.json
+          python tools/gen_truth2.py > tests/fixtures/truth2.json
+          git diff --exit-code -- tests/fixtures/truth.json tests/fixtures/truth2.json
+      - name: Run the Rust suite against the Python-generated truth
+        run: cargo test --verbose
+      - name: PyPGx reference test suite (characterization)
+        run: bash tools/run_reference_tests.sh
+
+  bam-build:
+    name: Build with samtools-rs (bam feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialize samtools-rs (+ nested htslib-rs)
+        run: git submodule update --init --recursive repos/samtools-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --features bam
+        run: cargo build --features bam

@@ -1,0 +1,15 @@
+[submodule "pypgx"]
+	path = repos/pypgx
+	url = git@github.com:madhavajay/pypgx.git
+[submodule "repos/samtools-rs"]
+	path = repos/samtools-rs
+	url = git@github.com:madhavajay/samtools-rs.git
+	branch = main
+[submodule "repos/bcftools-rs"]
+	path = repos/bcftools-rs
+	url = git@github.com:madhavajay/bcftools-rs.git
+	branch = main
+[submodule "repos/sklears"]
+	path = repos/sklears
+	url = git@github.com:madhavajay/sklears.git
+	branch = master

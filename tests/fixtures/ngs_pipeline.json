@@ -1,0 +1,25 @@
+{
+ "columns": [
+  "Genotype",
+  "Phenotype",
+  "Haplotype1",
+  "Haplotype2",
+  "AlternativePhase",
+  "VariantData",
+  "CNV"
+ ],
+ "index": [
+  "A"
+ ],
+ "rows": [
+  [
+   "*2/*3",
+   "Indeterminate",
+   "*2;",
+   "*3;",
+   "*4;",
+   "*4:19-15990431-C-T,19-16008388-A-C:0.5,0.667;*2:19-16008388-A-C:0.667;*3:19-15990431-C-T:0.5;",
+   "nan"
+  ]
+ ]
+}

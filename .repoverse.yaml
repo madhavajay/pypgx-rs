@@ -1,0 +1,56 @@
+version: 1
+defaults:
+  remote: github
+  revision: main
+  scheme: ssh
+remotes:
+  github:
+    host: github.com
+# Rust-native ports of the external tools pypgx shells out to. Beagle/phasing is
+# ported elsewhere; samtools/bcftools are covered here, both built on the shared
+# htslib-rs + (our) noodles fork. htslib-rs and noodles are vendored under BOTH
+# samtools-rs and bcftools-rs, so repoverse dedups them to a single real checkout
+# under repos/ and symlinks the nested occurrences (see `links`).
+projects:
+# The upstream PyPGx Python package (vendored reference / source of truth for
+# byte-for-byte parity; the differential harness installs + runs it).
+- name: madhavajay/pypgx
+  path: repos/pypgx
+  revision: master
+- name: madhavajay/samtools-rs
+  path: repos/samtools-rs
+  revision: main
+  consumes: [madhavajay/htslib-rs]
+- name: madhavajay/bcftools-rs
+  path: repos/bcftools-rs
+  revision: main
+  consumes: [madhavajay/htslib-rs]
+- name: madhavajay/htslib-rs
+  path: repos/htslib-rs
+  revision: main
+  consumes: [madhavajay/noodles]
+- name: madhavajay/noodles
+  path: repos/noodles
+  revision: madhava/bioscript
+# Rust-native scikit-learn replacement (CNV caller: OneVsRest + SVM). Standalone
+# Cargo workspace, no shared bio deps.
+- name: madhavajay/sklears
+  path: repos/sklears
+  revision: master
+provides:
+- madhavajay/pypgx
+- madhavajay/samtools-rs
+- madhavajay/bcftools-rs
+- madhavajay/htslib-rs
+- madhavajay/noodles
+- madhavajay/sklears
+links:
+- repo: madhavajay/htslib-rs
+  at: repos/samtools-rs/repos/htslib-rs
+  branch: main
+- repo: madhavajay/htslib-rs
+  at: repos/bcftools-rs/repos/htslib-rs
+  branch: main
+- repo: madhavajay/noodles
+  at: repos/htslib-rs/repos/noodles
+  branch: madhava/bioscript
