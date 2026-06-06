@@ -15,8 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # The default test suite needs no submodules — ground-truth fixtures are
-      # committed under tests/fixtures/.
+      - name: Use HTTPS for submodule clones (CI has no SSH key; repos are public)
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      # The default suite needs no submodule code, but Cargo must read the
+      # optional `samtools-rs` path-dep manifest to resolve the graph.
+      - name: Init samtools-rs (manifest only — bam feature is off)
+        run: git submodule update --init repos/samtools-rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
@@ -29,8 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Initialize PyPGx reference submodule
-        run: git submodule update --init repos/pypgx
+      - name: Use HTTPS for submodule clones
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      - name: Init reference (pypgx) + samtools-rs (manifest)
+        run: git submodule update --init repos/pypgx repos/samtools-rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
@@ -57,8 +63,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Initialize samtools-rs (+ nested htslib-rs)
-        run: git submodule update --init --recursive repos/samtools-rs
+      - name: Use HTTPS for submodule clones
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      - name: Init samtools-rs
+        run: git submodule update --init repos/samtools-rs
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --features bam
