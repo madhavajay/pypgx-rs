@@ -48,3 +48,5 @@ pub use crate::plot::{
 };
 #[cfg(feature = "bam")]
 pub use crate::api::{compute_control_statistics, compute_target_depth, prepare_depth_of_coverage};
+#[cfg(feature = "beagle")]
+pub use crate::external::estimate_phase_beagle;

@@ -22,13 +22,117 @@ macro_rules! deferred {
 
 // ---- Beagle phasing ------------------------------------------------------
 
+/// `estimate_phase_beagle` — statistical phasing of a `VcfFrame[Imported]`
+/// archive into `VcfFrame[Phased]` by shelling out to the **beagle-rs** binary
+/// (a drop-in for the Beagle jar): `beagle-rs gt=input.vcf chrom=<region>
+/// [ref=<panel>] out=<prefix> impute=<bool> em=<bool>`, with PyPGx's EM-skip
+/// retry (`em=true` then `em=false`). The bgzf `output.vcf.gz` is read back into
+/// a `VcfFrame[Phased]`. Binary discovery: `$BEAGLE_RS_BIN`, else `beagle-rs` on
+/// PATH.
+///
+/// ⚠️ **Not yet byte-parity with PyPGx.** PyPGx bundles Beagle **22Jul22.46e**;
+/// beagle-rs targets **27Feb25.75f** — phasing output can differ across Beagle
+/// versions. And `panel=None` here means *pure phasing with no reference panel*;
+/// PyPGx instead loads the 1KGP panel from `pypgx-bundle` (absent here). Treat
+/// this as a working integration pending version + panel reconciliation.
+#[cfg(feature = "beagle")]
+pub fn estimate_phase_beagle(
+    imported_variants: &Archive,
+    panel: Option<&str>,
+    impute: bool,
+) -> Result<Archive, PgxError> {
+    use crate::sdk::ArchiveData;
+    use std::io::Read;
+
+    let io = |e: std::io::Error| PgxError::External(e.to_string());
+    imported_variants.check_type(&["VcfFrame[Imported]"])?;
+    let gene = imported_variants
+        .get("Gene")
+        .ok_or_else(|| PgxError::External("missing Gene metadata".into()))?;
+    let assembly = imported_variants
+        .get("Assembly")
+        .ok_or_else(|| PgxError::External("missing Assembly metadata".into()))?;
+    let region = crate::core::get_region(gene, assembly)?;
+
+    let mut metadata = imported_variants.copy_metadata();
+    if let Some(e) = metadata.iter_mut().find(|(k, _)| k == "SemanticType") {
+        e.1 = "VcfFrame[Phased]".to_string();
+    }
+    metadata.push(("Program".to_string(), "Beagle".to_string()));
+
+    let vf = imported_variants.as_vcf();
+    if vf.rows.is_empty() {
+        return Ok(Archive::new(metadata, ArchiveData::Vcf(vf.clone())));
+    }
+
+    let dir = std::env::temp_dir().join(format!("pypgx_beagle_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(io)?;
+    let input = dir.join("input.vcf");
+    let out_prefix = dir.join("output");
+
+    // Imported frames carry no meta, so prepend a ##fileformat header.
+    let mut vcf = String::from("##fileformat=VCFv4.2\n");
+    for m in &vf.meta {
+        vcf.push_str(m);
+        vcf.push('\n');
+    }
+    vcf.push('#');
+    vcf.push_str(&vf.columns.join("\t"));
+    vcf.push('\n');
+    for r in &vf.rows {
+        vcf.push_str(&r.join("\t"));
+        vcf.push('\n');
+    }
+    std::fs::write(&input, vcf).map_err(io)?;
+
+    let bin = std::env::var("BEAGLE_RS_BIN").unwrap_or_else(|_| "beagle-rs".to_string());
+    let run = |em: bool| -> std::io::Result<std::process::Output> {
+        let mut cmd = std::process::Command::new(&bin);
+        cmd.arg(format!("gt={}", input.display()))
+            .arg(format!("chrom={region}"))
+            .arg(format!("out={}", out_prefix.display()))
+            .arg(format!("impute={impute}"))
+            .arg(format!("em={em}"))
+            .arg("nthreads=1");
+        if let Some(p) = panel {
+            cmd.arg(format!("ref={p}"));
+        }
+        cmd.output()
+    };
+
+    // EM-skip retry, mirroring PyPGx (em=true, then em=false on failure).
+    let mut output = run(true).map_err(io)?;
+    if !output.status.success() {
+        output = run(false).map_err(io)?;
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(PgxError::External(format!("beagle-rs failed: {stderr}")));
+    }
+
+    let gz = dir.join("output.vcf.gz");
+    let file = std::fs::File::open(&gz)
+        .map_err(|e| PgxError::External(format!("missing beagle output {}: {e}", gz.display())))?;
+    let mut text = String::new();
+    flate2::read::MultiGzDecoder::new(file)
+        .read_to_string(&mut text)
+        .map_err(io)?;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Ok(Archive::new(
+        metadata,
+        ArchiveData::Vcf(crate::fuc::VcfFrame::from_string(&text)),
+    ))
+}
+
+#[cfg(not(feature = "beagle"))]
 deferred!(
     estimate_phase_beagle(imported_variants: &Archive, panel: Option<&str>, impute: bool) -> Archive,
-    "java + beagle.22Jul22.46e.jar + pypgx-bundle 1KGP panel",
+    "the beagle-rs binary (enable feature `beagle`; binary via $BEAGLE_RS_BIN)",
     "`estimate_phase_beagle` — statistical phasing of a `VcfFrame[Imported]` \
-     archive into `VcfFrame[Phased]`. PyPGx runs: `java -Xmx2g -jar beagle.jar \
-     gt=input.vcf chrom=<region> ref=<panel> out=output impute=<bool> em=<bool>` \
-     with an EM-skip fallback. Needs the 1KGP reference panel from pypgx-bundle."
+     into `VcfFrame[Phased]`. Enable the `beagle` feature to shell out to the \
+     beagle-rs binary (`gt=`/`chrom=`/`ref=`/`out=`/`impute=`/`em=`)."
 );
 
 // ---- BAM / depth (samtools) ---------------------------------------------

@@ -613,18 +613,41 @@ Of the ~22 non-Beagle deferred functions:
   samtools-rs depth; needs BAM fixtures + a samtools/pysam oracle to confirm parity.
 - **Inherently non-parity (1):** `train_cnv_caller` — SVM training is libsvm-specific;
   no Rust trainer reproduces PyPGx's shipped models. Use convert + `predict_cnv` instead.
+- **Integrated, feature `beagle` (1):** `estimate_phase_beagle` — shells out to the
+  beagle-rs binary; wiring verified end-to-end (`tests/beagle.rs`). Unblocks
+  `run_chip`/`run_ngs` on unphased input. Byte-parity vs PyPGx pending version +
+  panel reconciliation (see §14).
 - **Upstream-dependency blocked (1):** `create_input_vcf` — needs `bcftools call`
   in bcftools-rs (blocker #1).
-- **Deferred by design (1):** `estimate_phase_beagle` → `beagle-rs` (see §14).
 
-## 14. Beagle integration plan (`repos/beagle-rs`, in progress)
+## 14. Beagle integration (`repos/beagle-rs`) — wired in ✅ (behind `beagle`)
 
-`beagle-rs` (vendored at `repos/beagle-rs`, branch `main`) is a from-scratch
-Rust port of Beagle 5.5 — **early** (porting the `vcf` module). Its own
-Definition of Done includes "replace the `estimate_phase_beagle` NotPorted stub
-in pypgx-rs and pass pypgx's tests," so the target is mutual.
+**Done (2026-06-07):** `beagle-rs`'s `gt=` phasing CLI is complete and a verified
+drop-in for the Beagle jar (its port reached "structurally complete + byte-parity
+vs Java" on the official fixtures). `estimate_phase_beagle` is now implemented in
+`src/external.rs` behind the **`beagle` feature**: it writes the imported
+VcfFrame to a temp `input.vcf`, invokes the `beagle-rs` binary
+(`gt=/chrom=/[ref=]/out=/impute=/em=`, EM-skip retry), reads the bgzf
+`output.vcf.gz` (via `flate2::MultiGzDecoder`), and returns the `VcfFrame[Phased]`
+archive. Integration verified end-to-end (`tests/beagle.rs` — phases a CYP4F2
+Imported frame; CI `beagle` job builds beagle-rs + runs it). With the feature on,
+`run_chip_pipeline` / `run_ngs_pipeline` run end-to-end on **unphased** input.
 
-**Integration contract** (from `utils.estimate_phase_beagle`): input is a
+**Still NOT byte-parity with PyPGx (deliberately flagged, not silently shipped):**
+1. **Beagle version mismatch** — PyPGx bundles `22Jul22.46e`; beagle-rs targets
+   `27Feb25.75f`. Phasing output can differ across versions; reconcile before
+   claiming parity vs PyPGx's reference.
+2. **Reference panel** — PyPGx always passes `ref=<1KGP panel>` from `pypgx-bundle`
+   (absent here). The current impl supports `panel=Some(path)` (reference-based)
+   and `panel=None` (pure phasing); PyPGx's `None` means "load from bundle".
+3. **`chr` prefix + Chip GSA filtering** — PyPGx's panel-driven chr-prefix
+   add/remove and `Platform=='Chip'` GSA allele filtering are not yet reproduced.
+
+Binary discovery: `$BEAGLE_RS_BIN`, else `beagle-rs` on PATH.
+
+---
+
+**Original integration contract** (from `utils.estimate_phase_beagle`): input is a
 `VcfFrame[Imported]`; PyPGx writes a temp `input.vcf` and runs
 `java -Xmx2g -jar beagle.jar gt=input.vcf chrom=<region> ref=<panel>
 out=output impute=<bool> em=<bool>`, then reads `output.vcf.gz` →

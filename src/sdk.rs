@@ -26,6 +26,9 @@ pub enum PgxError {
     /// external program, the `pypgx-bundle`, sklearn, or matplotlib. The string
     /// names the missing dependency.
     NotPorted(String),
+    /// A runtime failure invoking an external tool (e.g. the beagle-rs binary)
+    /// or its I/O — carries a human-readable message.
+    External(String),
 }
 
 impl std::fmt::Display for PgxError {
@@ -43,6 +46,7 @@ impl std::fmt::Display for PgxError {
             PgxError::NotPorted(dep) => {
                 write!(f, "not yet ported (requires {dep})")
             }
+            PgxError::External(m) => write!(f, "{m}"),
         }
     }
 }
