@@ -111,7 +111,11 @@ pub fn estimate_phase_beagle(
         }
     }
 
-    let dir = std::env::temp_dir().join(format!("pypgx_beagle_{}", std::process::id()));
+    // Unique per call (pid + atomic seq) so concurrent phasing of multiple genes
+    // in the same process never collides on the temp input/output files.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("pypgx_beagle_{}_{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(io)?;
     let input = dir.join("input.vcf");
     let out_prefix = dir.join("output");
