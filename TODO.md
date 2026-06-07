@@ -21,18 +21,37 @@ regenerates ground truth from Python and runs the Rust suite against it —
 depth, filter-samples, import-variants, long-read/ngs pipelines, regions-bed,
 round-trip), plus 2 more under `--features beagle` (46 total).
 
-> ⚠️ **Verification caveat (audited 2026-06-06).** The whole suite keys off a
-> single gene (CYP4F2) with trivial single-variant alleles. The code for the
-> SV/CNV machinery (12 of 13 SV genotypers + every CNV branch in
-> `call_genotypes`), the `sort_alleles`/`collapse_alleles` comparators, the
-> multi-variant `predict_alleles` VariantData ordering, and the entire CLI is
-> **present and code-faithful but exercised by no test**. Read "verified" below
-> as "verified on CYP4F2" for that slice. Full list in [§12](#12-known-gaps-audit-2026-06-06).
+> ⚠️ **Verification caveat (audited 2026-06-06; partially closed 2026-06-07).**
+> The core suite keys off CYP4F2 (single-variant alleles). Since the audit:
+> the SV genotyper + alleles↔CNV merge paths now have differential coverage vs
+> PyPGx (`tests/genotype_sv.rs`: GSTT1 cnv-only, CYP4F2 alleles+CNV), and the
+> CLI dispatch + graceful-error behavior are tested (`tests/cli.rs`). Still
+> exercised by no test: the remaining SV genotypers (only GSTT1 + CYP4F2's are
+> asserted), the `sort_alleles`/`collapse_alleles` comparators, and the
+> multi-variant `predict_alleles` VariantData ordering. Full list in
+> [§12](#12-known-gaps-audit-2026-06-06).
 >
 > ⚠️ **Build note.** If the crate directory is moved/renamed, run `cargo clean`:
 > stale test binaries bake in the old `CARGO_MANIFEST_DIR`, so the
 > archive-reading tests fail with spurious `No such file or directory` while the
 > `include_str!`-backed table tests still pass.
+
+### Hardening, cleanup & CLI parity (2026-06-07)
+
+- **Stub cleanup:** removed the 18 dead `external.rs` `NotPorted` stubs that
+  duplicated real implementations (one — `predict_cnv` — had been wrongly wired
+  into the pipeline). Only `estimate_phase_beagle` (+ no-feature fallback) and
+  the 3 genuinely-unported markers (`slice_bam`, `create_input_vcf`,
+  `train_cnv_caller`) remain.
+- **Panic-free Result contracts:** reachable `panic!`/`.expect()`/parse-`.unwrap()`
+  in `combine_results`, `call_genotypes`, `compute_copy_number`, `predict_cnv`,
+  `process_copy_number`, `call_phenotypes`, and `phase_extension` now return
+  `Err`/handle the case gracefully. The CLI additionally wraps dispatch in
+  `catch_unwind` → clean `error: …` + exit 1, never a backtrace (`tests/cli.rs`).
+- **SV/CNV coverage:** `tests/genotype_sv.rs` asserts the SV genotyper +
+  alleles↔CNV merge against PyPGx truth (GSTT1, CYP4F2).
+- **CLI parity:** added `run-chip-pipeline`, `run-long-read-pipeline`,
+  `filter-samples`, and (behind `--features plots`) the 5 `plot-*` subcommands.
 
 Done & verified:
 - ✅ Cargo crate (`src/`), 9 data tables embedded via `include_str!`.
