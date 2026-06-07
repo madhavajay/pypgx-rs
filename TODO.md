@@ -21,18 +21,41 @@ regenerates ground truth from Python and runs the Rust suite against it —
 depth, filter-samples, import-variants, long-read/ngs pipelines, regions-bed,
 round-trip), plus 2 more under `--features beagle` (46 total).
 
-> ⚠️ **Verification caveat (audited 2026-06-06).** The whole suite keys off a
-> single gene (CYP4F2) with trivial single-variant alleles. The code for the
-> SV/CNV machinery (12 of 13 SV genotypers + every CNV branch in
-> `call_genotypes`), the `sort_alleles`/`collapse_alleles` comparators, the
-> multi-variant `predict_alleles` VariantData ordering, and the entire CLI is
-> **present and code-faithful but exercised by no test**. Read "verified" below
-> as "verified on CYP4F2" for that slice. Full list in [§12](#12-known-gaps-audit-2026-06-06).
+> ⚠️ **Verification caveat (audited 2026-06-06; partially closed 2026-06-07).**
+> The core suite keys off CYP4F2 (single-variant alleles). Since the audit:
+> the SV genotyper + alleles↔CNV merge paths now have differential coverage vs
+> PyPGx (`tests/genotype_sv.rs`: GSTT1 cnv-only, CYP4F2 alleles+CNV), and the
+> CLI dispatch + graceful-error behavior are tested (`tests/cli.rs`). Still
+> exercised by no test: the `sort_alleles`/`collapse_alleles` comparators
+> directly (they are covered transitively), and SV genotypers beyond the 7 genes
+> in `tests/genotype_sv.rs`. The multi-variant `predict_alleles` VariantData case
+> is now tested (`tests/predict_alleles_multivariant.rs`) — and revealed that
+> PyPGx's variant *order* there is `PYTHONHASHSEED`-dependent (it stores the
+> variants in a Python `set`), so exact byte-parity on order is impossible;
+> Rust emits a deterministic position-sorted order and the variant *set* matches.
+> Full list in [§12](#12-known-gaps-audit-2026-06-06).
 >
 > ⚠️ **Build note.** If the crate directory is moved/renamed, run `cargo clean`:
 > stale test binaries bake in the old `CARGO_MANIFEST_DIR`, so the
 > archive-reading tests fail with spurious `No such file or directory` while the
 > `include_str!`-backed table tests still pass.
+
+### Hardening, cleanup & CLI parity (2026-06-07)
+
+- **Stub cleanup:** removed the 18 dead `external.rs` `NotPorted` stubs that
+  duplicated real implementations (one — `predict_cnv` — had been wrongly wired
+  into the pipeline). Only `estimate_phase_beagle` (+ no-feature fallback) and
+  the 3 genuinely-unported markers (`slice_bam`, `create_input_vcf`,
+  `train_cnv_caller`) remain.
+- **Panic-free Result contracts:** reachable `panic!`/`.expect()`/parse-`.unwrap()`
+  in `combine_results`, `call_genotypes`, `compute_copy_number`, `predict_cnv`,
+  `process_copy_number`, `call_phenotypes`, and `phase_extension` now return
+  `Err`/handle the case gracefully. The CLI additionally wraps dispatch in
+  `catch_unwind` → clean `error: …` + exit 1, never a backtrace (`tests/cli.rs`).
+- **SV/CNV coverage:** `tests/genotype_sv.rs` asserts the SV genotyper +
+  alleles↔CNV merge against PyPGx truth (GSTT1, CYP4F2).
+- **CLI parity:** added `run-chip-pipeline`, `run-long-read-pipeline`,
+  `filter-samples`, and (behind `--features plots`) the 5 `plot-*` subcommands.
 
 Done & verified:
 - ✅ Cargo crate (`src/`), 9 data tables embedded via `include_str!`.
@@ -474,9 +497,13 @@ source surfaced these deltas between earlier claims and the code. None break the
   indirectly via the CYP4F2 `predict_alleles` path (which doesn't discriminate
   the comparators and has empty synonyms). `truth.json` even holds ground-truth
   keys for these that no test asserts.
-- `predict_alleles` multi-variant VariantData ordering: Python iterates a `set`
-  (hash order); Rust uses a deterministic ordered `Vec`. Proven byte-identical
-  only for single-variant alleles (CYP4F2); multi-variant genes untested.
+- `predict_alleles` multi-variant VariantData ordering: **resolved/characterized**
+  (`tests/predict_alleles_multivariant.rs`, APOE E3). PyPGx stores each allele's
+  variants in a Python `set` (`utils.py:1131`), so the VariantData order is
+  `PYTHONHASHSEED`-dependent (seeds 0/1/2 → position order, seed 3 → reverse) —
+  exact byte-parity on order is impossible and not meaningful. Rust uses a
+  deterministic position-sorted `Vec` (a strict improvement); the variant *set*
+  and fractions match PyPGx. The test asserts set-equality + Rust's stable order.
 - The whole **CLI** (`src/bin/pypgx.rs`) — no test invokes the binary.
 - `sdk::check_type` / `copy_metadata` — implemented, never exercised.
 

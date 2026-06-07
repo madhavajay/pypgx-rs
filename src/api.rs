@@ -221,7 +221,9 @@ pub fn call_phenotypes(genotypes: &Archive) -> Result<Archive, PgxError> {
     genotypes.check_type(&["SampleTable[Genotypes]"])?;
     let gene = genotypes.get("Gene").expect("Gene metadata").to_string();
     let t = genotypes.as_sample_table();
-    let gt_c = t.columns.iter().position(|c| c == "Genotype").unwrap();
+    let gt_c = t.columns.iter().position(|c| c == "Genotype").ok_or_else(|| {
+        PgxError::IncorrectMetadata("SampleTable[Genotypes] missing 'Genotype' column".into())
+    })?;
 
     let mut rows = Vec::new();
     for r in &t.rows {
@@ -278,7 +280,7 @@ pub fn combine_results(
         .flatten()
         .collect();
     if tables.is_empty() {
-        panic!("No input data detected");
+        return Err(PgxError::IncorrectMetadata("No input data detected".into()));
     }
 
     let mut metadata = Vec::new();
@@ -286,7 +288,9 @@ pub fn combine_results(
         let vals: Vec<&str> = tables.iter().filter_map(|t| t.get(k)).collect();
         let uniq: HashSet<&str> = vals.iter().copied().collect();
         if uniq.len() > 1 {
-            panic!("Found incompatible inputs: {vals:?}");
+            return Err(PgxError::IncorrectMetadata(format!(
+                "Found incompatible inputs: {vals:?}"
+            )));
         }
         if let Some(v) = vals.first() {
             metadata.push((k.to_string(), v.to_string()));
@@ -590,7 +594,13 @@ fn phase_extension(vf: &VcfFrame, gene: &str, assembly: &str) -> VcfFrame {
             }
             // scores[i][j]: best anchor overlap of called allele i with haplotype j.
             let mut scores = [[0i64, 0], [0i64, 0]];
-            let gt: Vec<&str> = cell.split(':').next().unwrap_or("").split('/').collect();
+            // gt_het accepts both '/' and '|', so split on either; a non-diploid
+            // call can't be phase-extended, so pseudo-phase it and move on.
+            let gt: Vec<&str> = cell.split(':').next().unwrap_or("").split(['/', '|']).collect();
+            if gt.len() < 2 {
+                nr[9 + si] = format!("{}:0,0,0,0", crate::fuc::gt_pseudophase(cell));
+                continue;
+            }
             for i in 0..2 {
                 if gt[i] == "0" {
                     continue;
@@ -650,28 +660,36 @@ pub fn compute_copy_number(
     let stats = control_statistics.as_sample_table();
     let samples = cf.samples();
     if samples.iter().collect::<HashSet<_>>() != stats.index.iter().collect::<HashSet<_>>() {
-        panic!("Different sample sets found");
+        return Err(PgxError::External(
+            "read-depth and control-statistics have different sample sets".into(),
+        ));
     }
 
-    // Control median ('50%') per sample.
-    let pct50 = stats.columns.iter().position(|c| c == "50%").expect("50%");
-    let median = |s: &str| -> f64 {
-        let i = stats.index.iter().position(|x| x == s).unwrap();
-        stats.rows[i][pct50].parse::<f64>().unwrap()
+    let num = |v: &str| -> Result<f64, PgxError> {
+        v.parse::<f64>()
+            .map_err(|_| PgxError::External(format!("non-numeric depth value {v:?}")))
     };
+    // Control median ('50%') per sample.
+    let pct50 = stats.columns.iter().position(|c| c == "50%").ok_or_else(|| {
+        PgxError::IncorrectMetadata("SampleTable[Statistics] missing '50%' column".into())
+    })?;
+    let mut medians: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for s in &samples {
+        let i = stats.index.iter().position(|x| x == s).ok_or_else(|| {
+            PgxError::External(format!("sample {s} missing from control statistics"))
+        })?;
+        medians.insert(s.as_str(), num(&stats.rows[i][pct50])?);
+    }
 
     // Intra-sample normalization → a float matrix (rows × samples).
-    let mut mat: Vec<Vec<f64>> = cf
-        .rows
-        .iter()
-        .map(|r| {
-            samples
-                .iter()
-                .enumerate()
-                .map(|(k, s)| r[2 + k].parse::<f64>().unwrap() / median(s) * 2.0)
-                .collect()
-        })
-        .collect();
+    let mut mat: Vec<Vec<f64>> = Vec::with_capacity(cf.rows.len());
+    for r in &cf.rows {
+        let mut out = Vec::with_capacity(samples.len());
+        for (k, s) in samples.iter().enumerate() {
+            out.push(num(&r[2 + k])? / medians[s.as_str()] * 2.0);
+        }
+        mat.push(out);
+    }
 
     // Inter-sample (per-position) normalization for targeted sequencing.
     if read_depth.get("Platform") == Some("Targeted") {
@@ -755,9 +773,10 @@ fn process_copy_number(copy_number: &Archive) -> Archive {
     let (start, end) = (start.expect("start"), end.expect("end"));
     let nsamples = cf.samples().len();
 
-    // Densify positions if the frame is sparse vs the region span.
+    // Densify positions if the frame is sparse vs the region span. An empty
+    // frame has nothing to densify (and no rows[0]), so skip it.
     let mut rows = cf.rows.clone();
-    if end - start + 1 > rows.len() as i64 {
+    if !rows.is_empty() && end - start + 1 > rows.len() as i64 {
         let first: i64 = rows[0][1].parse().unwrap();
         let last: i64 = rows.last().unwrap()[1].parse().unwrap();
         let by_pos: std::collections::HashMap<i64, &Vec<String>> =
@@ -882,12 +901,20 @@ pub fn predict_cnv(copy_number: &Archive, cnv_caller: Option<&Archive>) -> Resul
     let cf = processed.as_cov();
     let names = cnv_names(&gene);
     let samples = cf.samples();
-    let calls: Vec<Vec<String>> = (0..samples.len())
-        .map(|si| {
-            let x: Vec<f64> = cf.rows.iter().map(|r| r[2 + si].parse::<f64>().unwrap()).collect();
-            vec![names[model.predict(&x) as usize].clone()]
-        })
-        .collect();
+    let mut calls: Vec<Vec<String>> = Vec::with_capacity(samples.len());
+    for si in 0..samples.len() {
+        let mut x: Vec<f64> = Vec::with_capacity(cf.rows.len());
+        for r in &cf.rows {
+            x.push(r[2 + si].parse::<f64>().map_err(|_| {
+                PgxError::External(format!("non-numeric copy-number value {:?}", r[2 + si]))
+            })?);
+        }
+        let label = model.predict(&x) as usize;
+        let name = names.get(label).ok_or_else(|| {
+            PgxError::External(format!("CNV model predicted label {label} with no name for {gene}"))
+        })?;
+        calls.push(vec![name.clone()]);
+    }
 
     let mut metadata = copy_number.copy_metadata();
     if let Some(e) = metadata.iter_mut().find(|(k, _)| k == "SemanticType") {

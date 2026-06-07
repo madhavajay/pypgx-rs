@@ -125,6 +125,94 @@ enum Command {
         /// Sequencing platform metadata.
         #[arg(long, default_value = "WGS")]
         platform: String,
+        /// Parallel worker threads (0 = auto / all cores).
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+    },
+    /// Run the chip/array pipeline over target genes on a VCF (phasing against
+    /// the bundle's 1KGP panel). Requires the `beagle` feature for unphased input.
+    RunChipPipeline {
+        #[arg(long)]
+        vcf: String,
+        #[arg(long, default_value = "GRCh38")]
+        assembly: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        bundle: Option<String>,
+        #[arg(long)]
+        genes: Option<String>,
+        /// Impute ungenotyped markers during phasing.
+        #[arg(long)]
+        impute: bool,
+        /// Parallel worker threads (0 = auto / all cores).
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+    },
+    /// Run the long-read pipeline over target genes on a VCF (read-backed
+    /// phasing; no bundle/panel needed).
+    RunLongReadPipeline {
+        #[arg(long)]
+        vcf: String,
+        #[arg(long, default_value = "GRCh38")]
+        assembly: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        genes: Option<String>,
+        /// Parallel worker threads (0 = auto / all cores).
+        #[arg(long, default_value_t = 0)]
+        jobs: usize,
+    },
+    /// Subset an archive to (or, with --exclude, away from) the given samples.
+    FilterSamples {
+        /// Input archive (.zip).
+        input: String,
+        /// Comma-separated sample names.
+        #[arg(long)]
+        samples: String,
+        /// Exclude the listed samples instead of keeping only them.
+        #[arg(long)]
+        exclude: bool,
+        /// Output archive (.zip); prints a summary if omitted.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Plot a copy-number profile (PNG) from a CovFrame[CopyNumber] archive.
+    #[cfg(feature = "plots")]
+    PlotBamCopyNumber {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot a read-depth profile (PNG) from a CovFrame[ReadDepth] archive.
+    #[cfg(feature = "plots")]
+    PlotBamReadDepth {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot allele fraction (PNG) from a VcfFrame[Imported] archive.
+    #[cfg(feature = "plots")]
+    PlotVcfAlleleFraction {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot VCF read depth (PNG) from a VcfFrame[Imported] archive.
+    #[cfg(feature = "plots")]
+    PlotVcfReadDepth {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot copy-number vs allele-fraction (PNG) from CopyNumber + Imported.
+    #[cfg(feature = "plots")]
+    PlotCnAf {
+        copy_number: String,
+        imported: String,
+        #[arg(long)]
+        output: String,
     },
 }
 
@@ -263,8 +351,74 @@ fn dispatch(command: Command) {
             bundle,
             genes,
             platform,
+            jobs,
         } => {
-            run_ngs_cli(&vcf, &assembly, &output, bundle, genes, &platform);
+            run_pipeline_cli(PipelineKind::Ngs, &vcf, &assembly, &output, bundle, genes, &platform, jobs);
+        }
+        Command::RunChipPipeline {
+            vcf,
+            assembly,
+            output,
+            bundle,
+            genes,
+            impute,
+            jobs,
+        } => {
+            run_pipeline_cli(PipelineKind::Chip { impute }, &vcf, &assembly, &output, bundle, genes, "Chip", jobs);
+        }
+        Command::RunLongReadPipeline {
+            vcf,
+            assembly,
+            output,
+            genes,
+            jobs,
+        } => {
+            run_pipeline_cli(PipelineKind::LongRead, &vcf, &assembly, &output, None, genes, "LongRead", jobs);
+        }
+        Command::FilterSamples {
+            input,
+            samples,
+            exclude,
+            output,
+        } => {
+            let archive = load(&input);
+            let names: Vec<String> = samples.split(',').map(|s| s.trim().to_string()).collect();
+            let result = pypgx::filter_samples(&archive, &names, exclude);
+            save_or_print(&result, output);
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotBamCopyNumber { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_bam_copy_number(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotBamReadDepth { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_bam_read_depth(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotVcfAlleleFraction { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_vcf_allele_fraction(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotVcfReadDepth { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            let archive = load(&input);
+            let gene = archive.get("Gene").expect("Gene metadata");
+            let assembly = archive.get("Assembly").expect("Assembly metadata");
+            pypgx::plot_vcf_read_depth(gene, &archive.as_vcf(), assembly, Some(&output), None)
+                .expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotCnAf {
+            copy_number,
+            imported,
+            output,
+        } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_cn_af(&load(&copy_number), &load(&imported), Some(&output), None)
+                .expect("plot");
         }
     }
 }
@@ -281,96 +435,186 @@ fn vcf_has_chr_prefix(vcf: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `pypgx run-ngs-pipeline` — slice each gene region from the VCF with `tabix`,
-/// run the NGS pipeline (phasing against the bundle's 1KGP panel), and collect a
-/// per-gene `results.tsv`. One bad gene never aborts the run.
-fn run_ngs_cli(
+/// Which per-gene pipeline a `run-*-pipeline` subcommand drives.
+#[derive(Clone, Copy)]
+enum PipelineKind {
+    Ngs,
+    Chip { impute: bool },
+    LongRead,
+}
+
+/// Shared driver for the `run-*-pipeline` subcommands: slice each gene region
+/// from the VCF with `tabix`, run the chosen pipeline (NGS/chip phase against the
+/// bundle's 1KGP panel; long-read needs none), and collect a per-gene
+/// `results.tsv`. One bad gene never aborts the run — main's quiet panic hook +
+/// the per-gene catch_unwind turn any failure into an `ERR:` row.
+#[allow(clippy::too_many_arguments)]
+fn run_pipeline_cli(
+    kind: PipelineKind,
     vcf: &str,
     assembly: &str,
     output: &str,
     bundle: Option<String>,
     genes: Option<String>,
     platform: &str,
+    jobs: usize,
 ) {
-    // Resolve the bundle and export it so predict_cnv's default-model lookup and
-    // panel resolution both find it.
-    let bundle = bundle
-        .or_else(|| std::env::var("PYPGX_BUNDLE").ok())
-        .unwrap_or_else(|| {
-            eprintln!("error: no bundle path (pass --bundle or set $PYPGX_BUNDLE)");
-            std::process::exit(2);
-        });
-    std::env::set_var("PYPGX_BUNDLE", &bundle);
+    // NGS/chip need the bundle (panel + default CNV model); long-read does not.
+    let needs_bundle = !matches!(kind, PipelineKind::LongRead);
+    let bundle = bundle.or_else(|| std::env::var("PYPGX_BUNDLE").ok());
+    if needs_bundle {
+        match &bundle {
+            // Set before spawning workers (env is process-global) so predict_cnv's
+            // default-model lookup and the panel path both resolve in every thread.
+            Some(b) => std::env::set_var("PYPGX_BUNDLE", b),
+            None => {
+                eprintln!("error: no bundle path (pass --bundle or set $PYPGX_BUNDLE)");
+                std::process::exit(2);
+            }
+        }
+    }
 
-    let gene_list: Vec<String> = match genes {
+    let mut gene_list: Vec<String> = match genes {
         Some(csv) => csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
         None => pypgx::list_genes("target"),
     };
 
     std::fs::create_dir_all(output).expect("create output dir");
-    let tmp = std::env::temp_dir().join(format!("pypgx_slices_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).expect("create slice dir");
     let chr = vcf_has_chr_prefix(vcf);
-    // A per-gene panic becomes an `ERR:panic` row (main's quiet hook suppresses
-    // the backtrace) so one bad gene never aborts the whole run.
+
+    // LPT scheduling: phasing cost tracks panel size, so start the biggest-panel
+    // genes (e.g. DPYD) first — they overlap with the many small genes and don't
+    // become a serial tail at the end.
+    if let Some(b) = bundle.as_deref() {
+        gene_list.sort_by_key(|g| {
+            std::cmp::Reverse(
+                std::fs::metadata(format!("{b}/1kgp/{assembly}/{g}.vcf.gz"))
+                    .map(|m| m.len())
+                    .unwrap_or(0),
+            )
+        });
+    }
+
+    let n = gene_list.len();
+    let jobs = match jobs {
+        0 => std::thread::available_parallelism().map(|j| j.get()).unwrap_or(1),
+        j => j,
+    }
+    .clamp(1, n.max(1));
+
+    // Each gene is independent (own tabix slice → pipeline → output dir), so fan
+    // them out across `jobs` worker threads pulling from a shared index. beagle-rs
+    // runs single-threaded per gene (nthreads=1), so N genes saturate N cores.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    let genes = Arc::new(gene_list);
+    let rows: Arc<Vec<Mutex<(String, bool)>>> =
+        Arc::new((0..n).map(|_| Mutex::new((String::new(), false))).collect());
+    let next = Arc::new(AtomicUsize::new(0));
+
+    let handles: Vec<_> = (0..jobs)
+        .map(|_| {
+            let (genes, rows, next) = (genes.clone(), rows.clone(), next.clone());
+            let (vcf, assembly, output, platform) =
+                (vcf.to_string(), assembly.to_string(), output.to_string(), platform.to_string());
+            let bundle = bundle.clone();
+            std::thread::spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= genes.len() {
+                    break;
+                }
+                let row = process_gene(
+                    kind, &vcf, &assembly, &output, bundle.as_deref(), chr, &platform, &genes[i],
+                );
+                *rows[i].lock().unwrap() = row;
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+
+    // Stable, execution-order-independent output: sort the rows by gene name.
+    let mut out: Vec<(String, String, bool)> = (0..n)
+        .map(|i| {
+            let (row, ok) = std::mem::take(&mut *rows[i].lock().unwrap());
+            (genes[i].clone(), row, ok)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut summary = String::from("Gene\tStatus\tGenotype\tPhenotype\n");
     let (mut ok, mut failed) = (0usize, 0usize);
-    for gene in &gene_list {
-        let region = match pypgx::core::get_region(gene, assembly) {
-            Ok(r) => if chr { format!("chr{r}") } else { r },
-            Err(e) => {
-                summary.push_str(&format!("{gene}\tERR:region:{e}\t\t\n"));
-                failed += 1;
-                continue;
-            }
-        };
-        let sliced = match ShellCommand::new("tabix").arg("-h").arg(vcf).arg(&region).output() {
-            Ok(o) if o.status.success() => o.stdout,
-            _ => {
-                summary.push_str(&format!("{gene}\tERR:tabix\t\t\n"));
-                failed += 1;
-                continue;
-            }
-        };
-        let vf = pypgx::fuc::VcfFrame::from_string(&String::from_utf8_lossy(&sliced));
-        let panel = format!("{bundle}/1kgp/{assembly}/{gene}.vcf.gz");
-        let panel_opt = std::path::Path::new(&panel).exists().then_some(panel.as_str());
-        let geneout = format!("{output}/{gene}");
-
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pypgx::run_ngs_pipeline(
-                gene, &geneout, Some(&vf), None, None, platform, assembly, panel_opt, true, None,
-                false, None, None,
-            )
-        }));
-        match run {
-            Ok(Ok(())) => {
-                let (mut g, mut p) = (String::new(), String::new());
-                if let Ok(r) = pypgx::Archive::from_file(&format!("{geneout}/results.zip")) {
-                    let st = r.as_sample_table();
-                    if let Some(gi) = st.columns.iter().position(|c| c == "Genotype") {
-                        g = st.rows.first().map(|r| r[gi].clone()).unwrap_or_default();
-                    }
-                    if let Some(pi) = st.columns.iter().position(|c| c == "Phenotype") {
-                        p = st.rows.first().map(|r| r[pi].clone()).unwrap_or_default();
-                    }
-                }
-                summary.push_str(&format!("{gene}\tok\t{g}\t{p}\n"));
-                ok += 1;
-            }
-            Ok(Err(e)) => {
-                let msg: String = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
-                summary.push_str(&format!("{gene}\tERR:{}\t\t\n", msg.chars().take(80).collect::<String>()));
-                failed += 1;
-            }
-            Err(_) => {
-                summary.push_str(&format!("{gene}\tERR:panic\t\t\n"));
-                failed += 1;
-            }
+    for (_, row, is_ok) in &out {
+        summary.push_str(row);
+        if *is_ok {
+            ok += 1;
+        } else {
+            failed += 1;
         }
     }
     let summary_path = format!("{output}/results.tsv");
     std::fs::write(&summary_path, &summary).expect("write results.tsv");
-    eprintln!("pypgx-rs: {ok} ok, {failed} failed over {} genes -> {summary_path}", gene_list.len());
+    eprintln!("pypgx-rs: {ok} ok, {failed} failed over {n} genes ({jobs} jobs) -> {summary_path}");
+}
+
+/// Run one gene's pipeline (tabix slice → chosen pipeline → read back the call)
+/// and return its `results.tsv` row plus whether it succeeded. Pure w.r.t. shared
+/// state: writes only to `{output}/{gene}/`, so it is safe to call concurrently.
+#[allow(clippy::too_many_arguments)]
+fn process_gene(
+    kind: PipelineKind,
+    vcf: &str,
+    assembly: &str,
+    output: &str,
+    bundle: Option<&str>,
+    chr: bool,
+    platform: &str,
+    gene: &str,
+) -> (String, bool) {
+    let region = match pypgx::core::get_region(gene, assembly) {
+        Ok(r) => if chr { format!("chr{r}") } else { r },
+        Err(e) => return (format!("{gene}\tERR:region:{e}\t\t\n"), false),
+    };
+    let sliced = match ShellCommand::new("tabix").arg("-h").arg(vcf).arg(&region).output() {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return (format!("{gene}\tERR:tabix\t\t\n"), false),
+    };
+    let vf = pypgx::fuc::VcfFrame::from_string(&String::from_utf8_lossy(&sliced));
+    let panel = bundle.map(|b| format!("{b}/1kgp/{assembly}/{gene}.vcf.gz"));
+    let panel_opt = panel.as_deref().filter(|p| std::path::Path::new(p).exists());
+    let geneout = format!("{output}/{gene}");
+
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
+        PipelineKind::Ngs => pypgx::run_ngs_pipeline(
+            gene, &geneout, Some(&vf), None, None, platform, assembly, panel_opt, true, None, false,
+            None, None,
+        ),
+        PipelineKind::Chip { impute } => pypgx::run_chip_pipeline(
+            gene, &geneout, &vf, assembly, panel_opt, impute, true, None, false,
+        ),
+        PipelineKind::LongRead => {
+            pypgx::run_long_read_pipeline(gene, &geneout, &vf, assembly, true, None, false)
+        }
+    }));
+    match run {
+        Ok(Ok(())) => {
+            let (mut g, mut p) = (String::new(), String::new());
+            if let Ok(r) = pypgx::Archive::from_file(&format!("{geneout}/results.zip")) {
+                let st = r.as_sample_table();
+                if let Some(gi) = st.columns.iter().position(|c| c == "Genotype") {
+                    g = st.rows.first().map(|r| r[gi].clone()).unwrap_or_default();
+                }
+                if let Some(pi) = st.columns.iter().position(|c| c == "Phenotype") {
+                    p = st.rows.first().map(|r| r[pi].clone()).unwrap_or_default();
+                }
+            }
+            (format!("{gene}\tok\t{g}\t{p}\n"), true)
+        }
+        Ok(Err(e)) => {
+            let msg: String = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+            (format!("{gene}\tERR:{}\t\t\n", msg.chars().take(80).collect::<String>()), false)
+        }
+        Err(_) => (format!("{gene}\tERR:panic\t\t\n"), false),
+    }
 }
