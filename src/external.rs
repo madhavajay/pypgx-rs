@@ -83,6 +83,34 @@ pub fn estimate_phase_beagle(
         region.clone()
     };
 
+    // Overlap pre-check (mirrors PyPGx): Beagle errors when 0 or 1 input markers
+    // overlap the reference panel, so handle those cases without running it.
+    if let Some(p) = panel {
+        let panel_vars: std::collections::HashSet<String> =
+            panel_variants(p).map_err(io)?.into_iter().collect();
+        let common: std::collections::HashSet<String> = vf_run
+            .to_variants()
+            .into_iter()
+            .filter(|v| panel_vars.contains(v))
+            .collect();
+        if common.len() <= 1 {
+            let phased = if let Some(variant) = common.iter().next() {
+                // One overlapping marker: pseudo-phase just that variant's row.
+                let pos = variant.split('-').nth(1).unwrap_or("");
+                let rows: Vec<Vec<String>> =
+                    vf_run.rows.iter().filter(|r| r[1] == pos).cloned().collect();
+                crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), rows)
+                    .pseudophase()
+                    .strip("GT")
+            } else {
+                // No overlapping markers: skip statistical phasing entirely.
+                crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), Vec::new())
+            };
+            let phased = if add_chr { phased.update_chr_prefix("remove") } else { phased };
+            return Ok(Archive::new(metadata, ArchiveData::Vcf(phased)));
+        }
+    }
+
     let dir = std::env::temp_dir().join(format!("pypgx_beagle_{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(io)?;
     let input = dir.join("input.vcf");
@@ -126,6 +154,13 @@ pub fn estimate_phase_beagle(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         let _ = std::fs::remove_dir_all(&dir);
+        // Markers too distant land in separate windows (Beagle: "Window has
+        // only one position"); PyPGx skips phasing in that case rather than crash.
+        if stderr.contains("Window has only one position") {
+            let empty = crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), Vec::new());
+            let empty = if add_chr { empty.update_chr_prefix("remove") } else { empty };
+            return Ok(Archive::new(metadata, ArchiveData::Vcf(empty)));
+        }
         return Err(PgxError::External(format!("beagle-rs failed: {stderr}")));
     }
 
@@ -159,6 +194,17 @@ fn panel_has_chr_prefix(panel: &str) -> std::io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+/// All `CHROM-POS-REF-ALT` variants in a (bgzf) reference panel, for the
+/// input∩panel overlap check.
+#[cfg(feature = "beagle")]
+fn panel_variants(panel: &str) -> std::io::Result<Vec<String>> {
+    use std::io::Read;
+    let file = std::fs::File::open(panel)?;
+    let mut text = String::new();
+    flate2::read::MultiGzDecoder::new(file).read_to_string(&mut text)?;
+    Ok(crate::fuc::VcfFrame::from_string(&text).to_variants())
 }
 
 #[cfg(not(feature = "beagle"))]
