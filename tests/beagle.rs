@@ -49,6 +49,43 @@ fn imported() -> Archive {
     )
 }
 
+fn fixture(name: &str) -> String {
+    format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// Regression test for the GSTM1/HTR1A crash class: when 0 or 1 input markers
+/// overlap the reference panel, the real Beagle (Java *and* beagle-rs) aborts
+/// with a window/single-marker assert. PyPGx works around this in its wrapper by
+/// short-circuiting those cases; `estimate_phase_beagle` mirrors that. These two
+/// cases return *before* the beagle-rs binary is ever invoked, so the guarantee
+/// holds for every gene regardless of which Beagle build is installed — and the
+/// test needs no binary.
+#[test]
+fn overlap_precheck_never_crashes() {
+    // 0 overlap: panel_zero has only 19-99999999-G-T, which none of the 5
+    // imported markers match → statistical phasing is skipped, empty Phased.
+    let phased = pypgx::external::estimate_phase_beagle(&imported(), Some(&fixture("panel_zero.vcf.gz")), false)
+        .expect("0-overlap must not crash");
+    assert_eq!(phased.semantic_type(), "VcfFrame[Phased]");
+    assert!(
+        phased.as_vcf().rows.is_empty(),
+        "0-overlap should yield an empty Phased frame, got {} rows",
+        phased.as_vcf().rows.len()
+    );
+
+    // 1 overlap: panel_one overlaps only at 19-16008388-A-C → that single row is
+    // pseudo-phased (no statistical phasing), the rest dropped.
+    let phased = pypgx::external::estimate_phase_beagle(&imported(), Some(&fixture("panel_one.vcf.gz")), false)
+        .expect("1-overlap must not crash");
+    assert_eq!(phased.semantic_type(), "VcfFrame[Phased]");
+    let vf = phased.as_vcf();
+    assert_eq!(vf.rows.len(), 1, "1-overlap should keep exactly the overlapping marker");
+    assert_eq!(vf.rows[0][1], "16008388", "kept marker should be the overlapping POS");
+    // Pseudo-phased + stripped to GT only.
+    let gt = vf.rows[0][9].split(':').next().unwrap_or("");
+    assert!(gt.contains('|'), "kept marker must be pseudo-phased, got {:?}", vf.rows[0][9]);
+}
+
 #[test]
 fn estimate_phase_beagle_phases_via_binary() {
     let bin = format!(
