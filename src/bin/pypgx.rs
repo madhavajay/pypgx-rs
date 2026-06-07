@@ -435,6 +435,36 @@ fn vcf_has_chr_prefix(vcf: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Best-effort memory budget in bytes: the smaller of this process's cgroup
+/// memory limit (v2 `memory.max`, else v1 `memory.limit_in_bytes`) and total
+/// system RAM (`/proc/meminfo`). `None` if nothing usable is found (e.g. non-
+/// Linux), in which case the caller leaves the job count uncapped.
+fn memory_budget_bytes() -> Option<u64> {
+    let parse = |s: &str| s.trim().parse::<u64>().ok();
+    // cgroup v2: a number, or "max" for unlimited.
+    let cgroup_v2 = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| parse(&s));
+    // cgroup v1: a number; "unlimited" is a huge sentinel near u64::MAX.
+    let cgroup_v1 = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+        .ok()
+        .and_then(|s| parse(&s))
+        .filter(|&v| v < (1u64 << 62));
+    let cgroup = cgroup_v2.or(cgroup_v1);
+    // Total system RAM (MemTotal is in kB).
+    let sys = std::fs::read_to_string("/proc/meminfo").ok().and_then(|s| {
+        s.lines()
+            .find(|l| l.starts_with("MemTotal:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map(|kb| kb * 1024)
+    });
+    match (cgroup, sys) {
+        (Some(c), Some(s)) => Some(c.min(s)),
+        (c, s) => c.or(s),
+    }
+}
+
 /// Which per-gene pipeline a `run-*-pipeline` subcommand drives.
 #[derive(Clone, Copy)]
 enum PipelineKind {
@@ -496,11 +526,32 @@ fn run_pipeline_cli(
     }
 
     let n = gene_list.len();
-    let jobs = match jobs {
+    let mut jobs = match jobs {
         0 => std::thread::available_parallelism().map(|j| j.get()).unwrap_or(1),
         j => j,
     }
     .clamp(1, n.max(1));
+
+    // Memory guard: each concurrent gene runs a beagle-rs subprocess (~0.5 GB
+    // peak on the biggest panel). In a memory-limited container (e.g. Docker
+    // Desktop), all-cores phasing can OOM, so cap jobs to the memory budget —
+    // the smaller of the cgroup limit and total RAM. Tunable via
+    // $PYPGX_JOB_MEM_MB (per-job budget; default 1024 MB).
+    let per_job_mb: u64 = std::env::var("PYPGX_JOB_MEM_MB").ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(1024);
+    if let Some(budget) = memory_budget_bytes() {
+        let mem_jobs = (budget / (per_job_mb * 1024 * 1024)).max(1) as usize;
+        if mem_jobs < jobs {
+            eprintln!(
+                "pypgx-rs: capping jobs {jobs} -> {mem_jobs} to fit ~{} MB memory \
+                 (~{per_job_mb} MB/job; set PYPGX_JOB_MEM_MB to override)",
+                budget / 1024 / 1024
+            );
+            jobs = mem_jobs;
+        }
+    }
 
     // Each gene is independent (own tabix slice → pipeline → output dir), so fan
     // them out across `jobs` worker threads pulling from a shared index. beagle-rs
