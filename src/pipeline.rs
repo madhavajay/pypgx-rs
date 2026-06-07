@@ -15,6 +15,24 @@ use crate::{api, core, external, genotype};
 
 type PipelineResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Run a pipeline body, converting any panic into a clean `Err` so a single bad
+/// gene (or any unexpected failure) never aborts the caller. Mirrors how PyPGx
+/// raises rather than crashes the process; here we additionally catch panics
+/// from not-yet-graceful internal paths.
+fn guard<F: FnOnce() -> PipelineResult>(body: F) -> PipelineResult {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(result) => result,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_string());
+            Err(Box::new(PgxError::External(format!("pipeline panicked: {msg}"))))
+        }
+    }
+}
+
 /// `os.mkdir(output)` with PyPGx's `force` semantics (rmtree first if forcing).
 fn ensure_output(output: &str, force: bool) -> std::io::Result<()> {
     let p = Path::new(output);
@@ -49,13 +67,16 @@ pub fn run_long_read_pipeline(
     samples: Option<&[String]>,
     exclude: bool,
 ) -> PipelineResult {
-    if !core::is_target_gene(gene) {
-        return Err(Box::new(PgxError::NotTargetGene(gene.to_string())));
-    }
-    ensure_output(output, force)?;
-    let consolidated = api::import_variants(gene, variants, assembly, "LongRead", samples, exclude)?;
-    consolidated.to_file(&format!("{output}/consolidated-variants.zip"))?;
-    finish(output, &consolidated)
+    guard(move || {
+        if !core::is_target_gene(gene) {
+            return Err(Box::new(PgxError::NotTargetGene(gene.to_string())));
+        }
+        ensure_output(output, force)?;
+        let consolidated =
+            api::import_variants(gene, variants, assembly, "LongRead", samples, exclude)?;
+        consolidated.to_file(&format!("{output}/consolidated-variants.zip"))?;
+        finish(output, &consolidated)
+    })
 }
 
 /// `run_chip_pipeline` — chip/array genotypes. Native when the input is already
@@ -73,23 +94,25 @@ pub fn run_chip_pipeline(
     samples: Option<&[String]>,
     exclude: bool,
 ) -> PipelineResult {
-    if !core::is_target_gene(gene) {
-        return Err(Box::new(PgxError::NotTargetGene(gene.to_string())));
-    }
-    ensure_output(output, force)?;
-    let imported = api::import_variants(gene, variants, assembly, "Chip", samples, exclude)?;
-    imported.to_file(&format!("{output}/imported-variants.zip"))?;
+    guard(move || {
+        if !core::is_target_gene(gene) {
+            return Err(Box::new(PgxError::NotTargetGene(gene.to_string())));
+        }
+        ensure_output(output, force)?;
+        let imported = api::import_variants(gene, variants, assembly, "Chip", samples, exclude)?;
+        imported.to_file(&format!("{output}/imported-variants.zip"))?;
 
-    let consolidated = if imported.semantic_type() == "VcfFrame[Consolidated]" {
-        imported
-    } else {
-        let phased = external::estimate_phase_beagle(&imported, panel, impute)?;
-        phased.to_file(&format!("{output}/phased-variants.zip"))?;
-        let consolidated = api::create_consolidated_vcf(&imported, &phased)?;
-        consolidated.to_file(&format!("{output}/consolidated-variants.zip"))?;
-        consolidated
-    };
-    finish(output, &consolidated)
+        let consolidated = if imported.semantic_type() == "VcfFrame[Consolidated]" {
+            imported
+        } else {
+            let phased = external::estimate_phase_beagle(&imported, panel, impute)?;
+            phased.to_file(&format!("{output}/phased-variants.zip"))?;
+            let consolidated = api::create_consolidated_vcf(&imported, &phased)?;
+            consolidated.to_file(&format!("{output}/consolidated-variants.zip"))?;
+            consolidated
+        };
+        finish(output, &consolidated)
+    })
 }
 
 /// `run_ngs_pipeline` — the full NGS pipeline. The variant arm runs natively
@@ -114,6 +137,7 @@ pub fn run_ngs_pipeline(
     samples_without_sv: Option<&[String]>,
     cnv_caller: Option<&Archive>,
 ) -> PipelineResult {
+    guard(move || {
     if !core::is_target_gene(gene) {
         return Err(Box::new(PgxError::NotTargetGene(gene.to_string())));
     }
@@ -197,4 +221,5 @@ pub fn run_ngs_pipeline(
         api::combine_results(Some(&genotypes), Some(&phenotypes), alleles.as_ref(), cnv_calls.as_ref())?;
     results.to_file(&format!("{output}/results.zip"))?;
     Ok(())
+    })
 }

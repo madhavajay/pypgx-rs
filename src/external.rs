@@ -65,6 +65,24 @@ pub fn estimate_phase_beagle(
         return Ok(Archive::new(metadata, ArchiveData::Vcf(vf.clone())));
     }
 
+    // Panel-driven chr-prefix (mirrors PyPGx): if the reference panel is
+    // `chr`-prefixed, add `chr` to the (de-chr'd) input + region before phasing,
+    // then strip it back off the output.
+    let add_chr = match panel {
+        Some(p) => panel_has_chr_prefix(p).unwrap_or(false),
+        None => false,
+    };
+    let vf_run = if add_chr {
+        std::borrow::Cow::Owned(vf.update_chr_prefix("add"))
+    } else {
+        std::borrow::Cow::Borrowed(vf)
+    };
+    let region_run = if add_chr && !region.starts_with("chr") {
+        format!("chr{region}")
+    } else {
+        region.clone()
+    };
+
     let dir = std::env::temp_dir().join(format!("pypgx_beagle_{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(io)?;
     let input = dir.join("input.vcf");
@@ -72,14 +90,14 @@ pub fn estimate_phase_beagle(
 
     // Imported frames carry no meta, so prepend a ##fileformat header.
     let mut vcf = String::from("##fileformat=VCFv4.2\n");
-    for m in &vf.meta {
+    for m in &vf_run.meta {
         vcf.push_str(m);
         vcf.push('\n');
     }
     vcf.push('#');
-    vcf.push_str(&vf.columns.join("\t"));
+    vcf.push_str(&vf_run.columns.join("\t"));
     vcf.push('\n');
-    for r in &vf.rows {
+    for r in &vf_run.rows {
         vcf.push_str(&r.join("\t"));
         vcf.push('\n');
     }
@@ -89,7 +107,7 @@ pub fn estimate_phase_beagle(
     let run = |em: bool| -> std::io::Result<std::process::Output> {
         let mut cmd = std::process::Command::new(&bin);
         cmd.arg(format!("gt={}", input.display()))
-            .arg(format!("chrom={region}"))
+            .arg(format!("chrom={region_run}"))
             .arg(format!("out={}", out_prefix.display()))
             .arg(format!("impute={impute}"))
             .arg(format!("em={em}"))
@@ -120,10 +138,27 @@ pub fn estimate_phase_beagle(
         .map_err(io)?;
     let _ = std::fs::remove_dir_all(&dir);
 
-    Ok(Archive::new(
-        metadata,
-        ArchiveData::Vcf(crate::fuc::VcfFrame::from_string(&text)),
-    ))
+    let mut phased = crate::fuc::VcfFrame::from_string(&text);
+    if add_chr {
+        phased = phased.update_chr_prefix("remove");
+    }
+    Ok(Archive::new(metadata, ArchiveData::Vcf(phased)))
+}
+
+/// Does the (bgzf) reference panel use `chr`-prefixed contigs? Peeks the first
+/// data record. Mirrors PyPGx's `pyvcf.has_chr_prefix(panel)`.
+#[cfg(feature = "beagle")]
+fn panel_has_chr_prefix(panel: &str) -> std::io::Result<bool> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(panel)?;
+    let reader = std::io::BufReader::new(flate2::read::MultiGzDecoder::new(file));
+    for line in reader.lines() {
+        let line = line?;
+        if !line.starts_with('#') {
+            return Ok(line.starts_with("chr"));
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(not(feature = "beagle"))]
