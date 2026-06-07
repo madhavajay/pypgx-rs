@@ -202,7 +202,7 @@ pub fn run_ngs_pipeline(
         read_depth.to_file(&format!("{output}/read-depth.zip"))?;
         let copy_number = api::compute_copy_number(&read_depth, &cs, samples_without_sv)?;
         copy_number.to_file(&format!("{output}/copy-number.zip"))?;
-        let calls = external::predict_cnv(&copy_number, cnv_caller)?;
+        let calls = api::predict_cnv(&copy_number, cnv_caller)?;
         calls.to_file(&format!("{output}/cnv-calls.zip"))?;
         #[cfg(feature = "plots")]
         {

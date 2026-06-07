@@ -6,6 +6,7 @@
 //! `pypgx::external` module).
 
 use clap::{Parser, Subcommand};
+use std::process::Command as ShellCommand;
 
 #[derive(Parser)]
 #[command(
@@ -101,6 +102,29 @@ enum Command {
     PrintData {
         /// Input archive (.zip).
         input: String,
+    },
+    /// Run the end-to-end NGS pipeline over target genes on a VCF (phasing via
+    /// beagle-rs + 1KGP panels from the bundle), writing per-gene archives and a
+    /// combined results.tsv. Requires the `beagle` feature for unphased input.
+    RunNgsPipeline {
+        /// Input VCF, bgzipped + tabix-indexed (e.g. sample.vcf.gz).
+        #[arg(long)]
+        vcf: String,
+        /// Genome assembly: GRCh37 or GRCh38.
+        #[arg(long, default_value = "GRCh38")]
+        assembly: String,
+        /// Output directory (one subdir per gene + a results.tsv summary).
+        #[arg(long)]
+        output: String,
+        /// pypgx-bundle path (1KGP panels + CNV models). Defaults to $PYPGX_BUNDLE.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Comma-separated gene list; default = all target genes.
+        #[arg(long)]
+        genes: Option<String>,
+        /// Sequencing platform metadata.
+        #[arg(long, default_value = "WGS")]
+        platform: String,
     },
 }
 
@@ -208,5 +232,122 @@ fn main() {
         Command::PrintData { input } => {
             print_sample_table(&load(&input));
         }
+        Command::RunNgsPipeline {
+            vcf,
+            assembly,
+            output,
+            bundle,
+            genes,
+            platform,
+        } => {
+            run_ngs_cli(&vcf, &assembly, &output, bundle, genes, &platform);
+        }
     }
+}
+
+/// Whether the VCF's contigs are `chr`-prefixed (peek `tabix -l`).
+fn vcf_has_chr_prefix(vcf: &str) -> bool {
+    ShellCommand::new("tabix")
+        .arg("-l")
+        .arg(vcf)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").starts_with("chr"))
+        .unwrap_or(false)
+}
+
+/// `pypgx run-ngs-pipeline` — slice each gene region from the VCF with `tabix`,
+/// run the NGS pipeline (phasing against the bundle's 1KGP panel), and collect a
+/// per-gene `results.tsv`. One bad gene never aborts the run.
+fn run_ngs_cli(
+    vcf: &str,
+    assembly: &str,
+    output: &str,
+    bundle: Option<String>,
+    genes: Option<String>,
+    platform: &str,
+) {
+    // Resolve the bundle and export it so predict_cnv's default-model lookup and
+    // panel resolution both find it.
+    let bundle = bundle
+        .or_else(|| std::env::var("PYPGX_BUNDLE").ok())
+        .unwrap_or_else(|| {
+            eprintln!("error: no bundle path (pass --bundle or set $PYPGX_BUNDLE)");
+            std::process::exit(2);
+        });
+    std::env::set_var("PYPGX_BUNDLE", &bundle);
+
+    let gene_list: Vec<String> = match genes {
+        Some(csv) => csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        None => pypgx::list_genes("target"),
+    };
+
+    std::fs::create_dir_all(output).expect("create output dir");
+    let tmp = std::env::temp_dir().join(format!("pypgx_slices_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("create slice dir");
+    let chr = vcf_has_chr_prefix(vcf);
+    // Internal panics become per-gene errors; keep the console quiet.
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let mut summary = String::from("Gene\tStatus\tGenotype\tPhenotype\n");
+    let (mut ok, mut failed) = (0usize, 0usize);
+    for gene in &gene_list {
+        let region = match pypgx::core::get_region(gene, assembly) {
+            Ok(r) => if chr { format!("chr{r}") } else { r },
+            Err(e) => {
+                summary.push_str(&format!("{gene}\tERR:region:{e}\t\t\n"));
+                failed += 1;
+                continue;
+            }
+        };
+        let sliced = match ShellCommand::new("tabix").arg("-h").arg(vcf).arg(&region).output() {
+            Ok(o) if o.status.success() => o.stdout,
+            _ => {
+                summary.push_str(&format!("{gene}\tERR:tabix\t\t\n"));
+                failed += 1;
+                continue;
+            }
+        };
+        let vf = pypgx::fuc::VcfFrame::from_string(&String::from_utf8_lossy(&sliced));
+        let panel = format!("{bundle}/1kgp/{assembly}/{gene}.vcf.gz");
+        let panel_opt = std::path::Path::new(&panel).exists().then_some(panel.as_str());
+        let geneout = format!("{output}/{gene}");
+
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pypgx::run_ngs_pipeline(
+                gene, &geneout, Some(&vf), None, None, platform, assembly, panel_opt, true, None,
+                false, None, None,
+            )
+        }));
+        match run {
+            Ok(Ok(())) => {
+                let (mut g, mut p) = (String::new(), String::new());
+                if let Ok(r) = pypgx::Archive::from_file(&format!("{geneout}/results.zip")) {
+                    let st = r.as_sample_table();
+                    if let Some(gi) = st.columns.iter().position(|c| c == "Genotype") {
+                        g = st.rows.first().map(|r| r[gi].clone()).unwrap_or_default();
+                    }
+                    if let Some(pi) = st.columns.iter().position(|c| c == "Phenotype") {
+                        p = st.rows.first().map(|r| r[pi].clone()).unwrap_or_default();
+                    }
+                }
+                summary.push_str(&format!("{gene}\tok\t{g}\t{p}\n"));
+                ok += 1;
+            }
+            Ok(Err(e)) => {
+                let msg: String = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
+                summary.push_str(&format!("{gene}\tERR:{}\t\t\n", msg.chars().take(80).collect::<String>()));
+                failed += 1;
+            }
+            Err(_) => {
+                summary.push_str(&format!("{gene}\tERR:panic\t\t\n"));
+                failed += 1;
+            }
+        }
+    }
+    let _ = std::panic::take_hook();
+    let summary_path = format!("{output}/results.tsv");
+    std::fs::write(&summary_path, &summary).expect("write results.tsv");
+    eprintln!("pypgx-rs: {ok} ok, {failed} failed over {} genes -> {summary_path}", gene_list.len());
 }

@@ -1,0 +1,66 @@
+name: Docker
+
+# Build the self-contained pypgx-rs image (CLI + beagle-rs + baked pypgx-bundle
+# reference data) for linux/amd64 + linux/arm64 and push a combined manifest to
+# GHCR on every push to main. arm64 compiles under QEMU emulation, so this job
+# is slow but produces native binaries for both arches in one manifest.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/madhavajay/pypgx-rs
+
+jobs:
+  build-push:
+    name: Build & push multi-arch image to GHCR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use HTTPS for submodule clones (CI has no SSH key; repos are public)
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+
+      # rust-builder needs beagle-rs (to build the binary) + samtools-rs (its
+      # manifest, for Cargo graph resolution). The bundle-builder unpickles the
+      # CNV models with plain scikit-learn, so it needs no submodule.
+      - name: Init submodules baked into the image
+        run: git submodule update --init repos/beagle-rs repos/samtools-rs
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=ref,event=tag
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
