@@ -126,6 +126,85 @@ enum Command {
         #[arg(long, default_value = "WGS")]
         platform: String,
     },
+    /// Run the chip/array pipeline over target genes on a VCF (phasing against
+    /// the bundle's 1KGP panel). Requires the `beagle` feature for unphased input.
+    RunChipPipeline {
+        #[arg(long)]
+        vcf: String,
+        #[arg(long, default_value = "GRCh38")]
+        assembly: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        bundle: Option<String>,
+        #[arg(long)]
+        genes: Option<String>,
+        /// Impute ungenotyped markers during phasing.
+        #[arg(long)]
+        impute: bool,
+    },
+    /// Run the long-read pipeline over target genes on a VCF (read-backed
+    /// phasing; no bundle/panel needed).
+    RunLongReadPipeline {
+        #[arg(long)]
+        vcf: String,
+        #[arg(long, default_value = "GRCh38")]
+        assembly: String,
+        #[arg(long)]
+        output: String,
+        #[arg(long)]
+        genes: Option<String>,
+    },
+    /// Subset an archive to (or, with --exclude, away from) the given samples.
+    FilterSamples {
+        /// Input archive (.zip).
+        input: String,
+        /// Comma-separated sample names.
+        #[arg(long)]
+        samples: String,
+        /// Exclude the listed samples instead of keeping only them.
+        #[arg(long)]
+        exclude: bool,
+        /// Output archive (.zip); prints a summary if omitted.
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Plot a copy-number profile (PNG) from a CovFrame[CopyNumber] archive.
+    #[cfg(feature = "plots")]
+    PlotBamCopyNumber {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot a read-depth profile (PNG) from a CovFrame[ReadDepth] archive.
+    #[cfg(feature = "plots")]
+    PlotBamReadDepth {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot allele fraction (PNG) from a VcfFrame[Imported] archive.
+    #[cfg(feature = "plots")]
+    PlotVcfAlleleFraction {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot VCF read depth (PNG) from a VcfFrame[Imported] archive.
+    #[cfg(feature = "plots")]
+    PlotVcfReadDepth {
+        input: String,
+        #[arg(long)]
+        output: String,
+    },
+    /// Plot copy-number vs allele-fraction (PNG) from CopyNumber + Imported.
+    #[cfg(feature = "plots")]
+    PlotCnAf {
+        copy_number: String,
+        imported: String,
+        #[arg(long)]
+        output: String,
+    },
 }
 
 fn load(path: &str) -> pypgx::Archive {
@@ -264,7 +343,70 @@ fn dispatch(command: Command) {
             genes,
             platform,
         } => {
-            run_ngs_cli(&vcf, &assembly, &output, bundle, genes, &platform);
+            run_pipeline_cli(PipelineKind::Ngs, &vcf, &assembly, &output, bundle, genes, &platform);
+        }
+        Command::RunChipPipeline {
+            vcf,
+            assembly,
+            output,
+            bundle,
+            genes,
+            impute,
+        } => {
+            run_pipeline_cli(PipelineKind::Chip { impute }, &vcf, &assembly, &output, bundle, genes, "Chip");
+        }
+        Command::RunLongReadPipeline {
+            vcf,
+            assembly,
+            output,
+            genes,
+        } => {
+            run_pipeline_cli(PipelineKind::LongRead, &vcf, &assembly, &output, None, genes, "LongRead");
+        }
+        Command::FilterSamples {
+            input,
+            samples,
+            exclude,
+            output,
+        } => {
+            let archive = load(&input);
+            let names: Vec<String> = samples.split(',').map(|s| s.trim().to_string()).collect();
+            let result = pypgx::filter_samples(&archive, &names, exclude);
+            save_or_print(&result, output);
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotBamCopyNumber { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_bam_copy_number(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotBamReadDepth { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_bam_read_depth(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotVcfAlleleFraction { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_vcf_allele_fraction(&load(&input), Some(&output), None).expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotVcfReadDepth { input, output } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            let archive = load(&input);
+            let gene = archive.get("Gene").expect("Gene metadata");
+            let assembly = archive.get("Assembly").expect("Assembly metadata");
+            pypgx::plot_vcf_read_depth(gene, &archive.as_vcf(), assembly, Some(&output), None)
+                .expect("plot");
+        }
+        #[cfg(feature = "plots")]
+        Command::PlotCnAf {
+            copy_number,
+            imported,
+            output,
+        } => {
+            std::fs::create_dir_all(&output).expect("create output dir");
+            pypgx::plot_cn_af(&load(&copy_number), &load(&imported), Some(&output), None)
+                .expect("plot");
         }
     }
 }
@@ -281,10 +423,20 @@ fn vcf_has_chr_prefix(vcf: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// `pypgx run-ngs-pipeline` — slice each gene region from the VCF with `tabix`,
-/// run the NGS pipeline (phasing against the bundle's 1KGP panel), and collect a
-/// per-gene `results.tsv`. One bad gene never aborts the run.
-fn run_ngs_cli(
+/// Which per-gene pipeline a `run-*-pipeline` subcommand drives.
+enum PipelineKind {
+    Ngs,
+    Chip { impute: bool },
+    LongRead,
+}
+
+/// Shared driver for the `run-*-pipeline` subcommands: slice each gene region
+/// from the VCF with `tabix`, run the chosen pipeline (NGS/chip phase against the
+/// bundle's 1KGP panel; long-read needs none), and collect a per-gene
+/// `results.tsv`. One bad gene never aborts the run — main's quiet panic hook +
+/// the per-gene catch_unwind turn any failure into an `ERR:` row.
+fn run_pipeline_cli(
+    kind: PipelineKind,
     vcf: &str,
     assembly: &str,
     output: &str,
@@ -292,15 +444,18 @@ fn run_ngs_cli(
     genes: Option<String>,
     platform: &str,
 ) {
-    // Resolve the bundle and export it so predict_cnv's default-model lookup and
-    // panel resolution both find it.
-    let bundle = bundle
-        .or_else(|| std::env::var("PYPGX_BUNDLE").ok())
-        .unwrap_or_else(|| {
-            eprintln!("error: no bundle path (pass --bundle or set $PYPGX_BUNDLE)");
-            std::process::exit(2);
-        });
-    std::env::set_var("PYPGX_BUNDLE", &bundle);
+    // NGS/chip need the bundle (panel + default CNV model); long-read does not.
+    let needs_bundle = !matches!(kind, PipelineKind::LongRead);
+    let bundle = bundle.or_else(|| std::env::var("PYPGX_BUNDLE").ok());
+    if needs_bundle {
+        match &bundle {
+            Some(b) => std::env::set_var("PYPGX_BUNDLE", b),
+            None => {
+                eprintln!("error: no bundle path (pass --bundle or set $PYPGX_BUNDLE)");
+                std::process::exit(2);
+            }
+        }
+    }
 
     let gene_list: Vec<String> = match genes {
         Some(csv) => csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
@@ -308,11 +463,7 @@ fn run_ngs_cli(
     };
 
     std::fs::create_dir_all(output).expect("create output dir");
-    let tmp = std::env::temp_dir().join(format!("pypgx_slices_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).expect("create slice dir");
     let chr = vcf_has_chr_prefix(vcf);
-    // A per-gene panic becomes an `ERR:panic` row (main's quiet hook suppresses
-    // the backtrace) so one bad gene never aborts the whole run.
 
     let mut summary = String::from("Gene\tStatus\tGenotype\tPhenotype\n");
     let (mut ok, mut failed) = (0usize, 0usize);
@@ -334,15 +485,21 @@ fn run_ngs_cli(
             }
         };
         let vf = pypgx::fuc::VcfFrame::from_string(&String::from_utf8_lossy(&sliced));
-        let panel = format!("{bundle}/1kgp/{assembly}/{gene}.vcf.gz");
-        let panel_opt = std::path::Path::new(&panel).exists().then_some(panel.as_str());
+        let panel = bundle.as_ref().map(|b| format!("{b}/1kgp/{assembly}/{gene}.vcf.gz"));
+        let panel_opt = panel.as_deref().filter(|p| std::path::Path::new(p).exists());
         let geneout = format!("{output}/{gene}");
 
-        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            pypgx::run_ngs_pipeline(
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &kind {
+            PipelineKind::Ngs => pypgx::run_ngs_pipeline(
                 gene, &geneout, Some(&vf), None, None, platform, assembly, panel_opt, true, None,
                 false, None, None,
-            )
+            ),
+            PipelineKind::Chip { impute } => pypgx::run_chip_pipeline(
+                gene, &geneout, &vf, assembly, panel_opt, *impute, true, None, false,
+            ),
+            PipelineKind::LongRead => {
+                pypgx::run_long_read_pipeline(gene, &geneout, &vf, assembly, true, None, false)
+            }
         }));
         match run {
             Ok(Ok(())) => {
