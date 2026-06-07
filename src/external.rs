@@ -201,14 +201,33 @@ fn panel_has_chr_prefix(panel: &str) -> std::io::Result<bool> {
 }
 
 /// All `CHROM-POS-REF-ALT` variants in a (bgzf) reference panel, for the
-/// input∩panel overlap check.
+/// input∩panel overlap check. Streams the panel and keeps only the 5 needed
+/// fields: parsing it into a full `VcfFrame` would materialize every 1KGP
+/// sample-genotype column (~2500 of them) and can reach multiple GB for
+/// big-panel genes (e.g. DPYD) — this stays at a few MB.
 #[cfg(feature = "beagle")]
 fn panel_variants(panel: &str) -> std::io::Result<Vec<String>> {
-    use std::io::Read;
+    use std::io::BufRead;
     let file = std::fs::File::open(panel)?;
-    let mut text = String::new();
-    flate2::read::MultiGzDecoder::new(file).read_to_string(&mut text)?;
-    Ok(crate::fuc::VcfFrame::from_string(&text).to_variants())
+    let reader = std::io::BufReader::new(flate2::read::MultiGzDecoder::new(file));
+    let mut out = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut f = line.split('\t');
+        let chrom = f.next().unwrap_or("");
+        let pos = f.next().unwrap_or("");
+        let _id = f.next();
+        let rf = f.next().unwrap_or("");
+        let alt = f.next().unwrap_or("");
+        // Match VcfFrame::to_variants: split multiallelic ALT on commas.
+        for a in alt.split(',') {
+            out.push(format!("{chrom}-{pos}-{rf}-{a}"));
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(not(feature = "beagle"))]
