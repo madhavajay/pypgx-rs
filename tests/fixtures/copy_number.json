@@ -1,0 +1,36 @@
+{
+ "columns": [
+  "Chromosome",
+  "Position",
+  "A",
+  "B"
+ ],
+ "rows": [
+  [
+   "19",
+   "15990431",
+   "2.0",
+   "2.0"
+  ],
+  [
+   "19",
+   "16008388",
+   "4.0",
+   "4.0"
+  ],
+  [
+   "19",
+   "16023930",
+   "6.0",
+   "1.0"
+  ]
+ ],
+ "metadata": {
+  "Gene": "CYP4F2",
+  "Assembly": "GRCh37",
+  "SemanticType": "CovFrame[CopyNumber]",
+  "Platform": "WGS",
+  "Control": "EGFR",
+  "Samples": "None"
+ }
+}

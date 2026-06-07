@@ -1,0 +1,47 @@
+{
+ "columns": [
+  "CHROM",
+  "POS",
+  "ID",
+  "REF",
+  "ALT",
+  "QUAL",
+  "FILTER",
+  "INFO",
+  "FORMAT",
+  "A"
+ ],
+ "rows": [
+  [
+   "19",
+   "16008388",
+   ".",
+   "A",
+   "C",
+   ".",
+   ".",
+   ".",
+   "GT:AD:DP:AF",
+   "0/1:15,15:30:0.500,0.500"
+  ],
+  [
+   "19",
+   "15990000",
+   ".",
+   "G",
+   "T",
+   ".",
+   ".",
+   ".",
+   "GT:AD:DP:AF",
+   "0/0:20,0:20:1.000,0.000"
+  ]
+ ],
+ "semantic_type": "VcfFrame[Imported]",
+ "metadata": {
+  "Platform": "WGS",
+  "Gene": "CYP4F2",
+  "Assembly": "GRCh37",
+  "SemanticType": "VcfFrame[Imported]"
+ }
+}

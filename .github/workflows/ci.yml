@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, "feat/**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust port — cargo test (43 parity/breadth/pipeline tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use HTTPS for submodule clones (CI has no SSH key; repos are public)
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      # The default suite needs no submodule code, but Cargo must read the
+      # optional `samtools-rs` path-dep manifest to resolve the graph.
+      - name: Init samtools-rs (manifest only — bam feature is off)
+        run: git submodule update --init repos/samtools-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --verbose
+      - name: cargo build --features plots (ruviz)
+        run: cargo build --features plots
+
+  differential:
+    name: Differential parity — Python PyPGx generates truth, Rust verifies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use HTTPS for submodule clones
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      - name: Init reference (pypgx) + samtools-rs (manifest)
+        run: git submodule update --init repos/pypgx repos/samtools-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install PyPGx reference + pinned deps (match the fixture-generation env)
+        # Float/CSV formatting is version-sensitive, so the committed fixtures
+        # only reproduce byte-for-byte with these exact versions (see .refenv).
+        run: |
+          pip install fuc==0.38.0 pandas==2.3.3 numpy==2.2.6 scikit-learn==1.7.2 scipy==1.15.3
+          pip install --no-deps ./repos/pypgx
+      - name: Regenerate ground truth from Python; confirm committed fixtures are current
+        run: |
+          python tools/gen_truth.py  > tests/fixtures/truth.json
+          python tools/gen_truth2.py > tests/fixtures/truth2.json
+          git diff --exit-code -- tests/fixtures/truth.json tests/fixtures/truth2.json
+      - name: Run the Rust suite against the Python-generated truth
+        run: cargo test --verbose
+      - name: PyPGx reference test suite (characterization)
+        run: bash tools/run_reference_tests.sh
+
+  bam-build:
+    name: Build with samtools-rs (bam feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use HTTPS for submodule clones
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      - name: Init samtools-rs
+        run: git submodule update --init repos/samtools-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --features bam
+        run: cargo build --features bam
+
+  beagle:
+    name: Beagle phasing integration (beagle feature)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use HTTPS for submodule clones
+        run: git config --global url."https://github.com/".insteadOf "git@github.com:"
+      - name: Init samtools-rs (manifest) + beagle-rs
+        run: git submodule update --init repos/samtools-rs repos/beagle-rs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the beagle-rs binary
+        run: cargo build --release -p beagle-rs-cli --manifest-path repos/beagle-rs/Cargo.toml
+      - name: pypgx ↔ beagle-rs phasing integration test
+        env:
+          BEAGLE_RS_BIN: ${{ github.workspace }}/repos/beagle-rs/target/release/beagle-rs
+        run: cargo test --features beagle --test beagle -- --nocapture
