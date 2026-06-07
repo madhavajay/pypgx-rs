@@ -153,7 +153,31 @@ fn save_or_print(archive: &pypgx::Archive, output: Option<String>) {
 
 fn main() {
     let cli = Cli::parse();
-    match cli.command {
+    // Turn any panic — CLI glue or a deep library `.unwrap()` — into a clean
+    // `error: ...` message and exit code 1, never a Rust backtrace.
+    std::panic::set_hook(Box::new(|_| {}));
+    if let Err(payload) =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(cli.command)))
+    {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown error".to_string());
+        // A closed downstream pipe (`pypgx ... | head`) is normal, not an error.
+        if msg.contains("Broken pipe") {
+            std::process::exit(0);
+        }
+        eprintln!("error: {msg}");
+        std::process::exit(1);
+    }
+}
+
+/// Dispatch one parsed subcommand. Any panic here is caught by `main` and
+/// reported as a clean error, so library `.unwrap()`/`.expect()` and explicit
+/// `panic!`s surface as `error: ...` rather than aborting with a backtrace.
+fn dispatch(command: Command) {
+    match command {
         Command::ListGenes { mode } => {
             for g in pypgx::list_genes(&mode) {
                 println!("{g}");
@@ -287,8 +311,8 @@ fn run_ngs_cli(
     let tmp = std::env::temp_dir().join(format!("pypgx_slices_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).expect("create slice dir");
     let chr = vcf_has_chr_prefix(vcf);
-    // Internal panics become per-gene errors; keep the console quiet.
-    std::panic::set_hook(Box::new(|_| {}));
+    // A per-gene panic becomes an `ERR:panic` row (main's quiet hook suppresses
+    // the backtrace) so one bad gene never aborts the whole run.
 
     let mut summary = String::from("Gene\tStatus\tGenotype\tPhenotype\n");
     let (mut ok, mut failed) = (0usize, 0usize);
@@ -346,7 +370,6 @@ fn run_ngs_cli(
             }
         }
     }
-    let _ = std::panic::take_hook();
     let summary_path = format!("{output}/results.tsv");
     std::fs::write(&summary_path, &summary).expect("write results.tsv");
     eprintln!("pypgx-rs: {ok} ok, {failed} failed over {} genes -> {summary_path}", gene_list.len());
