@@ -121,6 +121,60 @@ fn predict_cnv_and_test_end_to_end() {
     assert_eq!((report.accuracy, report.correct, report.total), (1.0, 1, 1));
 }
 
+/// `predict_cnv(cnv_caller=None)` resolves the default model from the bundle
+/// (`$PYPGX_BUNDLE/cnv/{assembly}/{gene}.zip`) — the path the NGS pipeline uses.
+#[test]
+fn predict_cnv_resolves_default_model_from_bundle() {
+    use pypgx::cnv::{CnvEstimator, CnvModel};
+    use pypgx::fuc::CovFrame;
+    use pypgx::sdk::{Archive, ArchiveData};
+
+    let (start, end) = (41_339_442i64, 41_396_352i64); // CYP2A6 GRCh37
+    let n = (end - start + 1) as usize;
+
+    // A bundle laid out like pypgx-bundle: {bundle}/cnv/GRCh37/CYP2A6.zip.
+    let bundle = std::env::temp_dir().join(format!("pypgx_bundle_test_{}", std::process::id()));
+    let cnv_dir = bundle.join("cnv").join("GRCh37");
+    std::fs::create_dir_all(&cnv_dir).unwrap();
+    let model = CnvModel {
+        classes: vec![0, 1],
+        estimators: vec![
+            CnvEstimator { label: 0, gamma: 0.001, intercept: 0.5, dual_coef: vec![1.0], support_vectors: vec![vec![2.0; n]] },
+            CnvEstimator { label: 1, gamma: 0.001, intercept: 0.0, dual_coef: vec![1.0], support_vectors: vec![vec![4.0; n]] },
+        ],
+    };
+    Archive::new(
+        vec![
+            ("Gene".to_string(), "CYP2A6".to_string()),
+            ("Assembly".to_string(), "GRCh37".to_string()),
+            ("SemanticType".to_string(), "Model[CNV]".to_string()),
+        ],
+        ArchiveData::Model(model),
+    )
+    .to_file(cnv_dir.join("CYP2A6.zip").to_str().unwrap())
+    .unwrap();
+
+    let cn = Archive::new(
+        vec![
+            ("Gene".to_string(), "CYP2A6".to_string()),
+            ("Assembly".to_string(), "GRCh37".to_string()),
+            ("SemanticType".to_string(), "CovFrame[CopyNumber]".to_string()),
+            ("Platform".to_string(), "WGS".to_string()),
+        ],
+        ArchiveData::Cov(CovFrame {
+            columns: vec!["Chromosome".into(), "Position".into(), "A".into()],
+            rows: (start..=end).map(|p| vec!["19".into(), p.to_string(), "2.0".into()]).collect(),
+        }),
+    );
+
+    std::env::set_var("PYPGX_BUNDLE", &bundle);
+    // No explicit caller → must load {bundle}/cnv/GRCh37/CYP2A6.zip and predict.
+    let calls = pypgx::predict_cnv(&cn, None).expect("default model resolved from bundle");
+    assert_eq!(calls.as_sample_table().loc("A"), &vec!["Normal".to_string()]);
+    std::env::remove_var("PYPGX_BUNDLE");
+    let _ = std::fs::remove_dir_all(&bundle);
+}
+
 #[test]
 fn rbf_ovr_predict_matches_sklearn() {
     let t: Value = serde_json::from_str(TRUTH).unwrap();

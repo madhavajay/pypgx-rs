@@ -838,18 +838,45 @@ fn cnv_names(gene: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolve the `pypgx-bundle` root: `$PYPGX_BUNDLE`, else `$HOME/pypgx-bundle`
+/// (mirrors PyPGx's `sdk.get_bundle_path`).
+pub fn bundle_path() -> Result<String, PgxError> {
+    if let Ok(p) = std::env::var("PYPGX_BUNDLE") {
+        return Ok(p);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(format!("{home}/pypgx-bundle"));
+    }
+    Err(PgxError::BundleNotFound(
+        "set $PYPGX_BUNDLE (or pass an explicit cnv_caller)".into(),
+    ))
+}
+
 /// `predict_cnv(copy_number, cnv_caller)` — predict per-sample CNV calls with a
 /// `Model[CNV]`, producing a `SampleTable[CNVCalls]`. Pure (RBF decision
-/// function). `cnv_caller=None` would load from the `pypgx-bundle` — not present
-/// here, so it returns `NotPorted`.
+/// function). When `cnv_caller=None`, the default model for this gene/assembly is
+/// loaded from the bundle (`{bundle}/cnv/{assembly}/{gene}.zip`, a Rust-converted
+/// `Model[CNV]` — see `tools/convert_cnv_models_all.py`), mirroring PyPGx.
 pub fn predict_cnv(copy_number: &Archive, cnv_caller: Option<&Archive>) -> Result<Archive, PgxError> {
     copy_number.check_type(&["CovFrame[CopyNumber]"])?;
-    let caller = cnv_caller.ok_or_else(|| {
-        PgxError::NotPorted("pypgx-bundle CNV model (pass an explicit cnv_caller)".into())
-    })?;
+    let gene = copy_number.get("Gene").expect("Gene").to_string();
+
+    // Resolve the caller: an explicit model, else the gene/assembly default from
+    // the bundle. `loaded` outlives the borrow taken in the `None` arm.
+    let loaded;
+    let caller = match cnv_caller {
+        Some(c) => c,
+        None => {
+            let assembly = copy_number.get("Assembly").expect("Assembly");
+            let path = format!("{}/cnv/{assembly}/{gene}.zip", bundle_path()?);
+            loaded = Archive::from_file(&path).map_err(|e| {
+                PgxError::BundleNotFound(format!("default CNV model {path}: {e}"))
+            })?;
+            &loaded
+        }
+    };
     caller.check_type(&["Model[CNV]"])?;
     let model = caller.as_model();
-    let gene = copy_number.get("Gene").expect("Gene").to_string();
 
     let processed = process_copy_number(copy_number);
     let cf = processed.as_cov();

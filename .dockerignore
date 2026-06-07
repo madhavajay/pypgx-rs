@@ -1,0 +1,14 @@
+# Keep the build context small + reproducible. The Rust build needs src/, data/
+# (CSV tables are include_str!'d at compile time), Cargo.*, tools/, and the
+# repos/ submodules — but never build artifacts, the python ref env, or any
+# already-fetched bundle/results.
+.git
+.github
+.refenv
+target
+**/target
+pypgx-bundle
+/pypgx-bundle
+rust-bundle
+results
+*.log

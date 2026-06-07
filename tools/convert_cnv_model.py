@@ -8,19 +8,22 @@ vectors, dual coefficients, intercept, gamma) and writes a new archive whose
 ``data.json`` matches ``pypgx::cnv::CnvModel``. The Rust ``predict_cnv`` then
 reproduces sklearn's predictions exactly (verified in ``tests/cnv.rs``).
 
-Usage (in the reference env that can unpickle the model):
+Usage (in any env with scikit-learn that can unpickle the model):
     python tools/convert_cnv_model.py IN_pickled_Model.zip OUT_rust_Model.zip
 
-Run inside ``.refenv`` (or any env with pypgx + scikit-learn), pointed at a
+No pypgx import is needed — the archive is a zip of `<stem>/metadata.txt` +
+`<stem>/data.sav`, and `data.sav` is a pure sklearn `OneVsRestClassifier(SVC)`
+pickle, so only scikit-learn (+ numpy) are required to unpickle it. Point it at a
 model from the ``pypgx-bundle`` (e.g. ``cnv/GRCh37/CYP2D6.zip``).
 """
 import sys
 import json
-import tempfile
 import zipfile
+import pickle
 import os
+import warnings
 
-from pypgx import sdk
+warnings.filterwarnings("ignore")  # cross-version unpickle warning is expected
 
 
 def main() -> None:
@@ -28,9 +31,13 @@ def main() -> None:
         sys.exit(__doc__)
     in_path, out_path = sys.argv[1], sys.argv[2]
 
-    archive = sdk.Archive.from_file(in_path)
-    archive.check_type("Model[CNV]")
-    clf = archive.data  # OneVsRestClassifier(SVC(kernel='rbf'))
+    # Read the pickled sklearn model + metadata straight out of the zip.
+    with zipfile.ZipFile(in_path) as z:
+        names = z.namelist()
+        sav = next(n for n in names if n.endswith("data.sav"))
+        meta = next((n for n in names if n.endswith("metadata.txt")), None)
+        clf = pickle.loads(z.read(sav))  # OneVsRestClassifier(SVC(kernel='rbf'))
+        metadata = z.read(meta).decode() if meta else ""
 
     estimators = []
     for est, label in zip(clf.estimators_, clf.classes_):
@@ -46,8 +53,7 @@ def main() -> None:
     # Write a Rust-readable archive: <stem>/metadata.txt + <stem>/data.json.
     stem = os.path.splitext(os.path.basename(out_path))[0]
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
-        meta = "".join(f"{k}={v}\n" for k, v in archive.metadata.items())
-        z.writestr(f"{stem}/metadata.txt", meta)
+        z.writestr(f"{stem}/metadata.txt", metadata)
         z.writestr(f"{stem}/data.json", json.dumps(model))
     print(f"Wrote Rust Model[CNV] -> {out_path} "
           f"({len(estimators)} estimators, {len(model['classes'])} classes)")

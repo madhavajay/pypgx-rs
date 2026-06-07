@@ -17,7 +17,9 @@ Python reference's computed outputs exactly; everything that needs an external
 program / sklearn / matplotlib is deferred by design with a documented stub.**
 Parity is proven by a differential harness (`tools/diff_harness.sh`) that
 regenerates ground truth from Python and runs the Rust suite against it —
-**24 tests green** (10 parity + 10 breadth + 2 round-trip + 2 pipeline-slice).
+**44 tests green** by default (parity, breadth, cnv, consolidate, copy-number,
+depth, filter-samples, import-variants, long-read/ngs pipelines, regions-bed,
+round-trip), plus 2 more under `--features beagle` (46 total).
 
 > ⚠️ **Verification caveat (audited 2026-06-06).** The whole suite keys off a
 > single gene (CYP4F2) with trivial single-variant alleles. The code for the
@@ -247,7 +249,7 @@ reproduces the discrepancies exactly rather than hiding them.
 |---|---|---|
 | `pandas` | DataFrames everywhere | `polars` (closest), or typed structs + `csv` for small tables. **Decide per-module**; tables are tiny → typed structs likely cleaner & more exact for NaN handling. |
 | `numpy` | arrays, stats | `ndarray` / std where small. |
-| `scikit-learn` | `Model[CNV]` one-vs-rest classifier (`train/test/predict_cnv`) | `linfa` or `smartcore`. **Pickled sklearn models won't load** — must retrain or re-serialize (§9). |
+| `scikit-learn` | `Model[CNV]` one-vs-rest classifier (`train/test/predict_cnv`) | **Native** RBF OvR-SVM decision function in `src/cnv.rs` (no ML dep). Pickled sklearn models don't load in Rust → **converted to weights** (`tools/convert_cnv_model{,s_all}.py`); all 26 bundle models reproduce `predict` exactly (§9). `train` stays non-parity. |
 | `matplotlib` | `plot.py` | `plotters` (deferred, feature-gated). |
 | `fuc` | VCF/cov/bed/variant primitives | `pypgx-fuc` (§6). |
 | `zipfile` | Archive container | `zip` crate. |
@@ -354,11 +356,28 @@ reproduces the discrepancies exactly rather than hiding them.
       `plot_vcf_allele_fraction`, `plot_vcf_read_depth`) — stubs in `src/external.rs`;
       reimplement via `plotters` (visual parity, not byte parity).
 
-### Phase 9 — CNV model (`Model[CNV]`) (deferred — scikit-learn)
-- [ ] `train_cnv_caller`, `test_cnv_caller`, `predict_cnv` — stubs in `src/external.rs`.
-- [ ] **Model interop:** pickled sklearn `Model[CNV]` archives can't be loaded in
-      Rust → retrain to a Rust-native format (`linfa`/`smartcore`) or add a Python
-      shim. Decide before implementing.
+### Phase 9 — CNV model (`Model[CNV]`) (done — sklearn pickles converted to weights)
+- [x] `predict_cnv` + `test_cnv_caller` — native in `src/api.rs`; evaluate the RBF
+      OvR-SVM decision function in `src/cnv.rs` and reproduce sklearn's `predict`
+      exactly (`tests/cnv.rs`, 1e-9). `median_filter` matches scipy exactly.
+- [x] **Model interop — resolved by conversion, not retraining.** PyPGx ships its
+      `Model[CNV]` as a pickled sklearn `OneVsRestClassifier(SVC)`. Rather than load
+      the pickle in Rust, `tools/convert_cnv_model.py` unpickles it once in Python
+      and dumps each estimator's fitted params (support vectors, dual coefs,
+      intercept, `_gamma`) to a `data.json` matching `pypgx::cnv::CnvModel`.
+- [x] **Full bundle converted + verified:** all **26** pypgx-bundle models
+      (13 SV genes × GRCh37/GRCh38) converted via `tools/convert_cnv_models_all.py`;
+      each reproduces sklearn's `predict` with **0 mismatches over 300 random
+      copy-number vectors** (7,800 total). Parity target is sklearn-in-`.refenv`,
+      which is exactly what PyPGx uses to load the same pickles.
+- [ ] **Wire-up (open):** `run_ngs_pipeline` still calls the deferred
+      `external::predict_cnv` stub (→ `NotPorted`) instead of native
+      `api::predict_cnv`, and `predict_cnv(cnv_caller=None)` does not yet
+      auto-resolve the default model from `{bundle}/cnv/{assembly}/{gene}.zip`.
+      Both are needed for the SV/CNV arm to run end-to-end from a BAM-depth input.
+- [ ] `train_cnv_caller` — **inherently non-parity** (libsvm-specific training); no
+      Rust trainer reproduces PyPGx's shipped models. Use convert + `predict_cnv`.
+      A sklears-backed trainer (different models) could go behind a `cnv` feature.
 
 ### Later — native external tools
 - [ ] Port **Beagle** phasing to Rust (drop the JVM dependency).
@@ -374,7 +393,8 @@ reproduces the discrepancies exactly rather than hiding them.
   ordering algorithm; tests depend on it.
 - **Equation evaluation:** `equation-table` holds Python expressions; need a safe
   evaluator with identical numeric semantics (int vs float, rounding).
-- **Pickled sklearn `Model[CNV]`** is not portable → retrain or shim (Phase 9).
+- **Pickled sklearn `Model[CNV]`** — resolved: not loaded in Rust, instead
+  converted to plain weights once in Python; all 26 bundle models verified (Phase 9).
 - **Beagle determinism:** seeds/version must match for phasing parity; pin the jar.
 - **`fuc` internal quirks:** VCF phasing string format, `parse_variant` edge cases —
   port against real fixtures, not assumptions.
@@ -563,6 +583,10 @@ Built out a faithful `fuc.pyvcf` surface in `src/fuc.rs` (`subset`, `slice`,
       `Model[CNV]` payload (`data.json`) round-trips; end-to-end verified at real
       CYP2A6 dimension. PyPGx's pickled models convert via
       `tools/convert_cnv_model.py` (one-time, in Python) → byte-parity predicts.
+      **All 26 bundle models now converted** (`tools/convert_cnv_models_all.py`,
+      13 SV genes × 2 assemblies): 0 prediction mismatches vs sklearn over 7,800
+      random vectors. Open: wire `run_ngs_pipeline` to `api::predict_cnv` + default
+      model resolution from the bundle (it still calls the `external` stub).
 - [ ] `train_cnv_caller` — **inherently non-parity**: SVM *training* is
       libsvm-specific, so no Rust trainer (sklears or otherwise) reproduces
       PyPGx's shipped models. The consumption path (convert + `predict_cnv`) is
@@ -588,10 +612,13 @@ Built out a faithful `fuc.pyvcf` surface in `src/fuc.rs` (`subset`, `slice`,
 1. **Variant calling**: `create_input_vcf` needs `bcftools call`/`mpileup`, which
    bcftools-rs lists as *"not started"*. Blocks calling variants from BAM;
    already-called-VCF / chip inputs are unaffected.
-2. **Pickled CNV model interop**: sklears can't load PyPGx's pickled sklearn
-   `Model[CNV]` (`data.sav`). Options: retrain in sklears, or extract fitted SVM
-   params (support vectors / dual coefs / intercept) once in Python and
-   reimplement the decision function in Rust (byte-parity, no training).
+2. **Pickled CNV model interop**: **resolved.** Rather than load PyPGx's pickled
+   sklearn `Model[CNV]` (`data.sav`) in Rust, extract the fitted SVM params
+   (support vectors / dual coefs / intercept / `_gamma`) once in Python
+   (`tools/convert_cnv_model{,s_all}.py`) and evaluate the RBF decision function
+   natively (`src/cnv.rs`) — byte-parity, no training. All 26 bundle models
+   converted + verified (0 mismatches). Remaining: wire `run_ngs_pipeline` to
+   `api::predict_cnv` and resolve the default model from `{bundle}/cnv/...`.
 3. **Depth backend**: resolved → **samtools-rs `native::depth`** (verified vs C
    samtools), behind the `bam` feature. Remaining gap is *verification*, not
    implementation: no BAM fixtures / pysam here to confirm pypgx byte-parity.
