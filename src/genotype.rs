@@ -114,15 +114,23 @@ pub fn call_genotypes(
                 let aset: std::collections::HashSet<&String> = at.index.iter().collect();
                 let cset: std::collections::HashSet<&String> = ct.index.iter().collect();
                 if aset != cset {
-                    panic!("SampleTable[Alleles] and SampleTable[CNVCalls] have different samples");
+                    return Err(PgxError::IncorrectMetadata(
+                        "SampleTable[Alleles] and SampleTable[CNVCalls] have different samples".into(),
+                    ));
                 }
                 if a.get("Gene") != c.get("Gene") {
-                    panic!("Found two different target genes");
+                    return Err(PgxError::IncorrectMetadata(
+                        "Found two different target genes".into(),
+                    ));
                 }
-                let cnv_idx = ct.columns.iter().position(|x| x == "CNV").unwrap();
+                let cnv_idx = ct.columns.iter().position(|x| x == "CNV").ok_or_else(|| {
+                    PgxError::IncorrectMetadata("SampleTable[CNVCalls] missing 'CNV' column".into())
+                })?;
                 let mut rows = Vec::new();
                 for (i, sample) in at.index.iter().enumerate() {
-                    let cj = ct.index.iter().position(|x| x == sample).unwrap();
+                    let cj = ct.index.iter().position(|x| x == sample).ok_or_else(|| {
+                        PgxError::External(format!("sample {sample} missing from CNV calls"))
+                    })?;
                     rows.push(parse_alleles_row(at, i, Some(ct.rows[cj][cnv_idx].clone())));
                 }
                 (
@@ -146,7 +154,9 @@ pub fn call_genotypes(
             }
             (None, Some(c)) => {
                 let ct = c.as_sample_table();
-                let cnv_idx = ct.columns.iter().position(|x| x == "CNV").unwrap();
+                let cnv_idx = ct.columns.iter().position(|x| x == "CNV").ok_or_else(|| {
+                    PgxError::IncorrectMetadata("SampleTable[CNVCalls] missing 'CNV' column".into())
+                })?;
                 let rows = (0..ct.index.len())
                     .map(|i| GtRow {
                         h1: Vec::new(),
@@ -163,7 +173,9 @@ pub fn call_genotypes(
                 )
             }
             (None, None) => {
-                panic!("Either SampleTable[Alleles] or SampleTable[CNVCalls] must be provided")
+                return Err(PgxError::IncorrectMetadata(
+                    "Either SampleTable[Alleles] or SampleTable[CNVCalls] must be provided".into(),
+                ));
             }
         };
 
