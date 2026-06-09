@@ -16,7 +16,7 @@ projects:
 # byte-for-byte parity; the differential harness installs + runs it).
 - name: madhavajay/pypgx
   path: repos/pypgx
-  revision: master
+  revision: update-beagle-27feb25
 - name: madhavajay/samtools-rs
   path: repos/samtools-rs
   revision: main
