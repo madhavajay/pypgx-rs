@@ -1,6 +1,6 @@
 [package]
 name = "pypgx"
-version = "0.26.0"
+version = "0.26.0-rs.1"
 edition = "2021"
 description = "A 1-for-1 Rust port of PyPGx (pharmacogenomics)"
 license = "MIT"

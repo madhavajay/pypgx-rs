@@ -353,7 +353,16 @@ fn dispatch(command: Command) {
             platform,
             jobs,
         } => {
-            run_pipeline_cli(PipelineKind::Ngs, &vcf, &assembly, &output, bundle, genes, &platform, jobs);
+            run_pipeline_cli(
+                PipelineKind::Ngs,
+                &vcf,
+                &assembly,
+                &output,
+                bundle,
+                genes,
+                &platform,
+                jobs,
+            );
         }
         Command::RunChipPipeline {
             vcf,
@@ -364,7 +373,16 @@ fn dispatch(command: Command) {
             impute,
             jobs,
         } => {
-            run_pipeline_cli(PipelineKind::Chip { impute }, &vcf, &assembly, &output, bundle, genes, "Chip", jobs);
+            run_pipeline_cli(
+                PipelineKind::Chip { impute },
+                &vcf,
+                &assembly,
+                &output,
+                bundle,
+                genes,
+                "Chip",
+                jobs,
+            );
         }
         Command::RunLongReadPipeline {
             vcf,
@@ -373,7 +391,16 @@ fn dispatch(command: Command) {
             genes,
             jobs,
         } => {
-            run_pipeline_cli(PipelineKind::LongRead, &vcf, &assembly, &output, None, genes, "LongRead", jobs);
+            run_pipeline_cli(
+                PipelineKind::LongRead,
+                &vcf,
+                &assembly,
+                &output,
+                None,
+                genes,
+                "LongRead",
+                jobs,
+            );
         }
         Command::FilterSamples {
             input,
@@ -431,7 +458,13 @@ fn vcf_has_chr_prefix(vcf: &str) -> bool {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").starts_with("chr"))
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .starts_with("chr")
+        })
         .unwrap_or(false)
 }
 
@@ -505,7 +538,11 @@ fn run_pipeline_cli(
     }
 
     let mut gene_list: Vec<String> = match genes {
-        Some(csv) => csv.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+        Some(csv) => csv
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
         None => pypgx::list_genes("target"),
     };
 
@@ -527,7 +564,9 @@ fn run_pipeline_cli(
 
     let n = gene_list.len();
     let mut jobs = match jobs {
-        0 => std::thread::available_parallelism().map(|j| j.get()).unwrap_or(1),
+        0 => std::thread::available_parallelism()
+            .map(|j| j.get())
+            .unwrap_or(1),
         j => j,
     }
     .clamp(1, n.max(1));
@@ -537,7 +576,8 @@ fn run_pipeline_cli(
     // Desktop), all-cores phasing can OOM, so cap jobs to the memory budget —
     // the smaller of the cgroup limit and total RAM. Tunable via
     // $PYPGX_JOB_MEM_MB (per-job budget; default 1024 MB).
-    let per_job_mb: u64 = std::env::var("PYPGX_JOB_MEM_MB").ok()
+    let per_job_mb: u64 = std::env::var("PYPGX_JOB_MEM_MB")
+        .ok()
         .and_then(|v| v.parse().ok())
         .filter(|&v| v > 0)
         .unwrap_or(1024);
@@ -559,15 +599,22 @@ fn run_pipeline_cli(
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     let genes = Arc::new(gene_list);
-    let rows: Arc<Vec<Mutex<(String, bool)>>> =
-        Arc::new((0..n).map(|_| Mutex::new((String::new(), false))).collect());
+    let rows: Arc<Vec<Mutex<GeneCliResult>>> = Arc::new(
+        (0..n)
+            .map(|_| Mutex::new(GeneCliResult::default()))
+            .collect(),
+    );
     let next = Arc::new(AtomicUsize::new(0));
 
     let handles: Vec<_> = (0..jobs)
         .map(|_| {
             let (genes, rows, next) = (genes.clone(), rows.clone(), next.clone());
-            let (vcf, assembly, output, platform) =
-                (vcf.to_string(), assembly.to_string(), output.to_string(), platform.to_string());
+            let (vcf, assembly, output, platform) = (
+                vcf.to_string(),
+                assembly.to_string(),
+                output.to_string(),
+                platform.to_string(),
+            );
             let bundle = bundle.clone();
             std::thread::spawn(move || loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
@@ -575,7 +622,14 @@ fn run_pipeline_cli(
                     break;
                 }
                 let row = process_gene(
-                    kind, &vcf, &assembly, &output, bundle.as_deref(), chr, &platform, &genes[i],
+                    kind,
+                    &vcf,
+                    &assembly,
+                    &output,
+                    bundle.as_deref(),
+                    chr,
+                    &platform,
+                    &genes[i],
                 );
                 *rows[i].lock().unwrap() = row;
             })
@@ -586,19 +640,23 @@ fn run_pipeline_cli(
     }
 
     // Stable, execution-order-independent output: sort the rows by gene name.
-    let mut out: Vec<(String, String, bool)> = (0..n)
+    let mut out: Vec<(String, GeneCliResult)> = (0..n)
         .map(|i| {
-            let (row, ok) = std::mem::take(&mut *rows[i].lock().unwrap());
-            (genes[i].clone(), row, ok)
+            let row = std::mem::take(&mut *rows[i].lock().unwrap());
+            (genes[i].clone(), row)
         })
         .collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let mut summary = String::from("Gene\tStatus\tGenotype\tPhenotype\n");
+    let mut summary = format!("Gene\tStatus\t{}\n", RESULT_COLUMNS.join("\t"));
+    let mut details = String::from(
+        "Gene\tStatus\tSample\tGenotype\tPhenotype\tHaplotype\tCandidateRank\tAllele\tVariant\tAlleleFraction\tAlternativePhase\tCNV\n",
+    );
     let (mut ok, mut failed) = (0usize, 0usize);
-    for (_, row, is_ok) in &out {
-        summary.push_str(row);
-        if *is_ok {
+    for (_, result) in &out {
+        summary.push_str(&result.summary);
+        details.push_str(&result.details);
+        if result.ok {
             ok += 1;
         } else {
             failed += 1;
@@ -606,7 +664,18 @@ fn run_pipeline_cli(
     }
     let summary_path = format!("{output}/results.tsv");
     std::fs::write(&summary_path, &summary).expect("write results.tsv");
-    eprintln!("pypgx-rs: {ok} ok, {failed} failed over {n} genes ({jobs} jobs) -> {summary_path}");
+    let details_path = format!("{output}/results.long.tsv");
+    std::fs::write(&details_path, &details).expect("write results.long.tsv");
+    eprintln!(
+        "pypgx-rs: {ok} ok, {failed} failed over {n} genes ({jobs} jobs) -> {summary_path}, {details_path}"
+    );
+}
+
+#[derive(Default)]
+struct GeneCliResult {
+    summary: String,
+    details: String,
+    ok: bool,
 }
 
 /// Run one gene's pipeline (tabix slice → chosen pipeline → read back the call)
@@ -622,24 +691,48 @@ fn process_gene(
     chr: bool,
     platform: &str,
     gene: &str,
-) -> (String, bool) {
+) -> GeneCliResult {
     let region = match pypgx::core::get_region(gene, assembly) {
-        Ok(r) => if chr { format!("chr{r}") } else { r },
-        Err(e) => return (format!("{gene}\tERR:region:{e}\t\t\n"), false),
+        Ok(r) => {
+            if chr {
+                format!("chr{r}")
+            } else {
+                r
+            }
+        }
+        Err(e) => return error_result(gene, &format!("ERR:region:{e}")),
     };
-    let sliced = match ShellCommand::new("tabix").arg("-h").arg(vcf).arg(&region).output() {
+    let sliced = match ShellCommand::new("tabix")
+        .arg("-h")
+        .arg(vcf)
+        .arg(&region)
+        .output()
+    {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return (format!("{gene}\tERR:tabix\t\t\n"), false),
+        _ => return error_result(gene, "ERR:tabix"),
     };
     let vf = pypgx::fuc::VcfFrame::from_string(&String::from_utf8_lossy(&sliced));
     let panel = bundle.map(|b| format!("{b}/1kgp/{assembly}/{gene}.vcf.gz"));
-    let panel_opt = panel.as_deref().filter(|p| std::path::Path::new(p).exists());
+    let panel_opt = panel
+        .as_deref()
+        .filter(|p| std::path::Path::new(p).exists());
     let geneout = format!("{output}/{gene}");
 
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
         PipelineKind::Ngs => pypgx::run_ngs_pipeline(
-            gene, &geneout, Some(&vf), None, None, platform, assembly, panel_opt, true, None, false,
-            None, None,
+            gene,
+            &geneout,
+            Some(&vf),
+            None,
+            None,
+            platform,
+            assembly,
+            panel_opt,
+            true,
+            None,
+            false,
+            None,
+            None,
         ),
         PipelineKind::Chip { impute } => pypgx::run_chip_pipeline(
             gene, &geneout, &vf, assembly, panel_opt, impute, true, None, false,
@@ -650,22 +743,219 @@ fn process_gene(
     }));
     match run {
         Ok(Ok(())) => {
-            let (mut g, mut p) = (String::new(), String::new());
+            let mut values = vec![String::new(); RESULT_COLUMNS.len()];
+            let mut details = String::new();
             if let Ok(r) = pypgx::Archive::from_file(&format!("{geneout}/results.zip")) {
                 let st = r.as_sample_table();
-                if let Some(gi) = st.columns.iter().position(|c| c == "Genotype") {
-                    g = st.rows.first().map(|r| r[gi].clone()).unwrap_or_default();
+                if let Some(row) = st.rows.first() {
+                    for (i, col) in RESULT_COLUMNS.iter().enumerate() {
+                        if let Some(ci) = st.columns.iter().position(|c| c == col) {
+                            values[i] = row[ci].clone();
+                        }
+                    }
                 }
-                if let Some(pi) = st.columns.iter().position(|c| c == "Phenotype") {
-                    p = st.rows.first().map(|r| r[pi].clone()).unwrap_or_default();
-                }
+                details = long_result_rows(gene, "ok", &r);
             }
-            (format!("{gene}\tok\t{g}\t{p}\n"), true)
+            GeneCliResult {
+                summary: format!(
+                    "{gene}\tok\t{}\n",
+                    values
+                        .iter()
+                        .map(|v| tsv_cell(v))
+                        .collect::<Vec<_>>()
+                        .join("\t")
+                ),
+                details,
+                ok: true,
+            }
         }
         Ok(Err(e)) => {
-            let msg: String = e.to_string().split_whitespace().collect::<Vec<_>>().join(" ");
-            (format!("{gene}\tERR:{}\t\t\n", msg.chars().take(80).collect::<String>()), false)
+            let msg: String = e
+                .to_string()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            error_result(
+                gene,
+                &format!("ERR:{}", msg.chars().take(80).collect::<String>()),
+            )
         }
-        Err(_) => (format!("{gene}\tERR:panic\t\t\n"), false),
+        Err(_) => error_result(gene, "ERR:panic"),
     }
+}
+
+const RESULT_COLUMNS: [&str; 7] = [
+    "Genotype",
+    "Phenotype",
+    "Haplotype1",
+    "Haplotype2",
+    "AlternativePhase",
+    "VariantData",
+    "CNV",
+];
+
+fn error_result(gene: &str, status: &str) -> GeneCliResult {
+    GeneCliResult {
+        summary: format!(
+            "{gene}\t{}\t{}\n",
+            tsv_cell(status),
+            vec![String::new(); RESULT_COLUMNS.len()].join("\t")
+        ),
+        details: format!("{gene}\t{}\t\t\t\t\t\t\t\t\t\t\n", tsv_cell(status)),
+        ok: false,
+    }
+}
+
+fn long_result_rows(gene: &str, status: &str, archive: &pypgx::Archive) -> String {
+    let st = archive.as_sample_table();
+    let col = |name: &str| st.columns.iter().position(|c| c == name);
+    let genotype_c = col("Genotype");
+    let phenotype_c = col("Phenotype");
+    let haplotype1_c = col("Haplotype1");
+    let haplotype2_c = col("Haplotype2");
+    let alt_phase_c = col("AlternativePhase");
+    let variant_data_c = col("VariantData");
+    let cnv_c = col("CNV");
+
+    let mut out = String::new();
+    for (ri, sample) in st.index.iter().enumerate() {
+        let row = &st.rows[ri];
+        let genotype = genotype_c.map(|i| row[i].as_str()).unwrap_or("");
+        let phenotype = phenotype_c.map(|i| row[i].as_str()).unwrap_or("");
+        let alt_phase = alt_phase_c.map(|i| row[i].as_str()).unwrap_or("");
+        let cnv = cnv_c.map(|i| row[i].as_str()).unwrap_or("");
+        let variant_data = variant_data_c.map(|i| row[i].as_str()).unwrap_or("");
+        let variants = parse_variant_data_entries(variant_data);
+
+        for (label, ci) in [
+            ("Haplotype1", haplotype1_c),
+            ("Haplotype2", haplotype2_c),
+            ("AlternativePhase", alt_phase_c),
+        ] {
+            let Some(ci) = ci else { continue };
+            for (rank, allele) in split_semis(&row[ci]).iter().enumerate() {
+                let entries = variants
+                    .iter()
+                    .find(|(a, _)| a == allele)
+                    .map(|(_, entries)| entries.as_slice())
+                    .unwrap_or(&[]);
+                if entries.is_empty() {
+                    push_long_row(
+                        &mut out,
+                        gene,
+                        status,
+                        sample,
+                        genotype,
+                        phenotype,
+                        label,
+                        rank + 1,
+                        allele,
+                        "",
+                        "",
+                        alt_phase,
+                        cnv,
+                    );
+                } else {
+                    for (variant, fraction) in entries {
+                        push_long_row(
+                            &mut out,
+                            gene,
+                            status,
+                            sample,
+                            genotype,
+                            phenotype,
+                            label,
+                            rank + 1,
+                            allele,
+                            variant,
+                            fraction,
+                            alt_phase,
+                            cnv,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn split_semis(value: &str) -> Vec<String> {
+    value
+        .trim_matches(';')
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn parse_variant_data_entries(value: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let mut out = Vec::new();
+    for entry in split_semis(value) {
+        let fields: Vec<&str> = entry.splitn(3, ':').collect();
+        if fields.len() < 2 {
+            continue;
+        }
+        let allele = fields[0].to_string();
+        let entries = if fields[1] == "default" {
+            vec![("default".to_string(), String::new())]
+        } else if fields.len() == 3 {
+            let variants: Vec<&str> = fields[1].split(',').collect();
+            let fractions: Vec<&str> = fields[2].split(',').collect();
+            variants
+                .iter()
+                .enumerate()
+                .map(|(i, variant)| {
+                    (
+                        (*variant).to_string(),
+                        fractions.get(i).copied().unwrap_or("").to_string(),
+                    )
+                })
+                .collect()
+        } else {
+            vec![(fields[1].to_string(), String::new())]
+        };
+        out.push((allele, entries));
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_long_row(
+    out: &mut String,
+    gene: &str,
+    status: &str,
+    sample: &str,
+    genotype: &str,
+    phenotype: &str,
+    haplotype: &str,
+    rank: usize,
+    allele: &str,
+    variant: &str,
+    fraction: &str,
+    alt_phase: &str,
+    cnv: &str,
+) {
+    out.push_str(
+        &[
+            tsv_cell(gene),
+            tsv_cell(status),
+            tsv_cell(sample),
+            tsv_cell(genotype),
+            tsv_cell(phenotype),
+            tsv_cell(haplotype),
+            rank.to_string(),
+            tsv_cell(allele),
+            tsv_cell(variant),
+            tsv_cell(fraction),
+            tsv_cell(alt_phase),
+            tsv_cell(cnv),
+        ]
+        .join("\t"),
+    );
+    out.push('\n');
+}
+
+fn tsv_cell(value: &str) -> String {
+    value.replace(['\t', '\n', '\r'], " ")
 }
