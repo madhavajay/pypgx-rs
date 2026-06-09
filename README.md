@@ -54,6 +54,6 @@ source .refenv/bin/activate && uv pip install ./pypgx
 
 > Note: on the vendored v0.26.0 data, 3 of upstream's 6 `test.py` checks are
 > data-consistency assertions the shipped tables violate (a duplicate allele,
-> two variant-table diffs, and a phenotype-table mismatch). The Rust tests assert
+> the ACYP2 variant-table diff, and a phenotype-table mismatch). The Rust tests assert
 > the reference's *computed* values, so they reproduce these discrepancies
 > exactly rather than masking them.

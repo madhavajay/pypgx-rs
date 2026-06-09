@@ -3,7 +3,7 @@
 //!
 //! Note: on the vendored v0.26.0 data, three of the six upstream tests fail as
 //! data-consistency assertions (duplicate allele `19-39738787-C-T`, the
-//! `ACYP2`/`CYP17A1` variant diffs, and the `MT-RNR1` priority mismatch). A
+//! `ACYP2` variant diffs, and the `MT-RNR1` priority mismatch). A
 //! faithful 1-for-1 port must reproduce those exact computed values — so here
 //! we assert the reference's *computed* outputs rather than that the upstream
 //! assertions pass.
@@ -278,6 +278,19 @@ fn build_definition_table_matches() {
             }
         }
     }
+}
+
+#[test]
+fn cyp17a1_grch38_definition_table_builds() {
+    let vf = core::build_definition_table("CYP17A1", "GRCh38");
+    let pos_c = vf.columns.iter().position(|c| c == "POS").unwrap();
+    let info_c = vf.columns.iter().position(|c| c == "INFO").unwrap();
+    assert!(
+        vf.rows
+            .iter()
+            .any(|r| r[pos_c] == "102830835" && r[info_c] == "VI=L465P"),
+        "CYP17A1 L465P GRCh38 coordinate should match the variant table"
+    );
 }
 
 #[test]

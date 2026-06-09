@@ -83,8 +83,8 @@ those binaries; native ports are Phases 4/6/8/9.
 
 > **Key finding (faithful parity):** upstream `test.py` does **not** fully pass
 > on the vendored v0.26.0 data — 3 of 6 are data-consistency assertions that the
-> shipped tables violate (duplicate allele `19-39738787-C-T`, the `ACYP2` /
-> `CYP17A1` variant-table diffs, and the `MT-RNR1` priority mismatch). The Rust
+> shipped tables violate (duplicate allele `19-39738787-C-T`, the `ACYP2`
+> variant-table diffs, and the `MT-RNR1` priority mismatch). The Rust
 > parity tests assert the reference's *computed* values, so they reproduce these
 > exact discrepancies rather than papering over them.
 
@@ -249,7 +249,7 @@ reproduces the discrepancies exactly rather than hiding them.
 - [x] `test_diplotype_table` — 15 diplotype genes == `PhenotypeMethod=='Diplotype'`.
 - [x] `test_equation_table` — 3 equation genes == `PhenotypeMethod=='Score'`.
 - [x] `test_priority_table` — reproduces `a` (incl. `MT-RNR1`) vs `b` (excl.) discrepancy.
-- [x] `test_definition_table` — reproduces the `ACYP2` (both) and `CYP17A1` (GRCh38) diffs.
+- [x] `test_definition_table` — reproduces the remaining `ACYP2` diffs.
 - [x] `test_predict_alleles` — **integration milestone.** Byte-identical output on
       both CYP4F2 archives:
       ```

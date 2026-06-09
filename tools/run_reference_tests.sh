@@ -3,7 +3,7 @@
 #
 # On the vendored v0.26.0 data, 3 of the 6 tests pass and 3 are
 # data-consistency assertions that the shipped tables themselves violate
-# (duplicate allele 19-39738787-C-T; the ACYP2 / CYP17A1 variant-table diffs;
+# (duplicate allele 19-39738787-C-T; the ACYP2 variant-table diffs;
 # the MT-RNR1 priority mismatch). The Rust parity suite asserts the reference's
 # *computed* values, reproducing those exact discrepancies — so `cargo test`
 # is fully green. This script passes iff the reference is in that documented
