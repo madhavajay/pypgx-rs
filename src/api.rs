@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bed::BedFrame;
 use crate::core;
-use crate::fuc::{python_float_str, VcfFrame};
+use crate::fuc::{python_float_str, sort_variants, VcfFrame};
 use crate::sdk::{Archive, ArchiveData, PgxError, SampleTable};
 
 /// `predict_alleles(consolidated_variants)` — predict candidate star alleles
@@ -61,7 +61,7 @@ pub fn predict_alleles(consolidated_variants: &Archive) -> Result<Archive, PgxEr
                 }
             }
         }
-        star_alleles.push((allele, vars));
+        star_alleles.push((allele, sort_variants(vars)));
     }
     let star_sets: Vec<HashSet<String>> = star_alleles
         .iter()
