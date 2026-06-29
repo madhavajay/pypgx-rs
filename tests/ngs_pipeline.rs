@@ -1,7 +1,7 @@
 //! End-to-end test for `run_ngs_pipeline` on the native path: pre-phased input
 //! (→ no Beagle) and no depth-of-coverage (→ no CNV/sklearn). Verifies the
-//! Results table vs Python. The Beagle and CNV arms are exercised structurally
-//! but surface `NotPorted` (covered by `pipeline_notported`, below).
+//! Results table vs Python. Without the `beagle` feature, the Beagle arm is
+//! exercised structurally and surfaces `NotPorted`.
 
 use pypgx::fuc::VcfFrame;
 use serde_json::Value;
@@ -61,7 +61,8 @@ fn run_ngs_pipeline_native_path_matches_python() {
     assert!(got[6].is_empty() || got[6] == "nan");
 }
 
-/// The Beagle arm (unphased NGS input) surfaces `NotPorted` (deferred to beagle-rs).
+/// Without the `beagle` feature, unphased NGS input surfaces `NotPorted`.
+#[cfg(not(feature = "beagle"))]
 #[test]
 fn run_ngs_pipeline_beagle_arm_is_notported() {
     // An unphased input forces the statistical-phasing branch.

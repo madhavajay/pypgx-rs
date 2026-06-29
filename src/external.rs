@@ -28,7 +28,8 @@ macro_rules! deferred {
 /// [ref=<panel>] out=<prefix> impute=<bool> em=<bool>`, with PyPGx's EM-skip
 /// retry (`em=true` then `em=false`). The bgzf `output.vcf.gz` is read back into
 /// a `VcfFrame[Phased]`. Binary discovery: `$BEAGLE_RS_BIN`, else `beagle-rs` on
-/// PATH.
+/// PATH. We deliberately do not pass `nthreads`, matching PyPGx's Java Beagle
+/// invocation; Beagle phase orientation can be thread-count-sensitive.
 ///
 /// ⚠️ **Not yet byte-parity with PyPGx.** PyPGx bundles Beagle **22Jul22.46e**;
 /// beagle-rs targets **27Feb25.75f** — phasing output can differ across Beagle
@@ -97,8 +98,12 @@ pub fn estimate_phase_beagle(
             let phased = if let Some(variant) = common.iter().next() {
                 // One overlapping marker: pseudo-phase just that variant's row.
                 let pos = variant.split('-').nth(1).unwrap_or("");
-                let rows: Vec<Vec<String>> =
-                    vf_run.rows.iter().filter(|r| r[1] == pos).cloned().collect();
+                let rows: Vec<Vec<String>> = vf_run
+                    .rows
+                    .iter()
+                    .filter(|r| r[1] == pos)
+                    .cloned()
+                    .collect();
                 crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), rows)
                     .pseudophase()
                     .strip("GT")
@@ -106,7 +111,11 @@ pub fn estimate_phase_beagle(
                 // No overlapping markers: skip statistical phasing entirely.
                 crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), Vec::new())
             };
-            let phased = if add_chr { phased.update_chr_prefix("remove") } else { phased };
+            let phased = if add_chr {
+                phased.update_chr_prefix("remove")
+            } else {
+                phased
+            };
             return Ok(Archive::new(metadata, ArchiveData::Vcf(phased)));
         }
     }
@@ -137,16 +146,7 @@ pub fn estimate_phase_beagle(
 
     let bin = std::env::var("BEAGLE_RS_BIN").unwrap_or_else(|_| "beagle-rs".to_string());
     let run = |em: bool| -> std::io::Result<std::process::Output> {
-        let mut cmd = std::process::Command::new(&bin);
-        cmd.arg(format!("gt={}", input.display()))
-            .arg(format!("chrom={region_run}"))
-            .arg(format!("out={}", out_prefix.display()))
-            .arg(format!("impute={impute}"))
-            .arg(format!("em={em}"))
-            .arg("nthreads=1");
-        if let Some(p) = panel {
-            cmd.arg(format!("ref={p}"));
-        }
+        let mut cmd = beagle_command(&bin, &input, &region_run, &out_prefix, impute, em, panel);
         cmd.output()
     };
 
@@ -162,7 +162,11 @@ pub fn estimate_phase_beagle(
         // only one position"); PyPGx skips phasing in that case rather than crash.
         if stderr.contains("Window has only one position") {
             let empty = crate::fuc::VcfFrame::new(Vec::new(), vf_run.columns.clone(), Vec::new());
-            let empty = if add_chr { empty.update_chr_prefix("remove") } else { empty };
+            let empty = if add_chr {
+                empty.update_chr_prefix("remove")
+            } else {
+                empty
+            };
             return Ok(Archive::new(metadata, ArchiveData::Vcf(empty)));
         }
         return Err(PgxError::External(format!("beagle-rs failed: {stderr}")));
@@ -182,6 +186,28 @@ pub fn estimate_phase_beagle(
         phased = phased.update_chr_prefix("remove");
     }
     Ok(Archive::new(metadata, ArchiveData::Vcf(phased)))
+}
+
+#[cfg(feature = "beagle")]
+fn beagle_command(
+    bin: &str,
+    input: &std::path::Path,
+    region: &str,
+    out_prefix: &std::path::Path,
+    impute: bool,
+    em: bool,
+    panel: Option<&str>,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.arg(format!("gt={}", input.display()))
+        .arg(format!("chrom={region}"))
+        .arg(format!("out={}", out_prefix.display()))
+        .arg(format!("impute={impute}"))
+        .arg(format!("em={em}"));
+    if let Some(p) = panel {
+        cmd.arg(format!("ref={p}"));
+    }
+    cmd
 }
 
 /// Does the (bgzf) reference panel use `chr`-prefixed contigs? Peeks the first
@@ -265,3 +291,36 @@ deferred!(
      reproduces PyPGx's libsvm-fitted models; the parity route is \
      `tools/convert_cnv_model.py` + native `api::predict_cnv`."
 );
+
+#[cfg(all(test, feature = "beagle"))]
+mod tests {
+    use super::beagle_command;
+
+    #[test]
+    fn beagle_args_match_pypgx_thread_default_for_g6pd_parity() {
+        let cmd = beagle_command(
+            "beagle-rs",
+            std::path::Path::new("/tmp/input.vcf"),
+            "chrX:154528389-154550018",
+            std::path::Path::new("/tmp/output"),
+            false,
+            true,
+            Some("/bundle/1kgp/GRCh38/G6PD.vcf.gz"),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(args.contains(&"gt=/tmp/input.vcf".to_string()));
+        assert!(args.contains(&"chrom=chrX:154528389-154550018".to_string()));
+        assert!(args.contains(&"out=/tmp/output".to_string()));
+        assert!(args.contains(&"impute=false".to_string()));
+        assert!(args.contains(&"em=true".to_string()));
+        assert!(args.contains(&"ref=/bundle/1kgp/GRCh38/G6PD.vcf.gz".to_string()));
+        assert!(
+            args.iter().all(|arg| !arg.starts_with("nthreads=")),
+            "PyPGx does not pass nthreads; forcing it changed G6PD HG01621/HG01808/HG02614 phase orientation: {args:?}"
+        );
+    }
+}

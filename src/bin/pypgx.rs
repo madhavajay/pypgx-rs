@@ -571,11 +571,10 @@ fn run_pipeline_cli(
     }
     .clamp(1, n.max(1));
 
-    // Memory guard: each concurrent gene runs a beagle-rs subprocess (~0.5 GB
-    // peak on the biggest panel). In a memory-limited container (e.g. Docker
-    // Desktop), all-cores phasing can OOM, so cap jobs to the memory budget —
-    // the smaller of the cgroup limit and total RAM. Tunable via
-    // $PYPGX_JOB_MEM_MB (per-job budget; default 1024 MB).
+    // Memory guard: each concurrent gene can run a Beagle subprocess. In a
+    // memory-limited container (e.g. Docker Desktop), all-cores phasing can OOM,
+    // so cap jobs to the memory budget — the smaller of the cgroup limit and
+    // total RAM. Tunable via $PYPGX_JOB_MEM_MB (per-job budget; default 1024 MB).
     let per_job_mb: u64 = std::env::var("PYPGX_JOB_MEM_MB")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -594,8 +593,7 @@ fn run_pipeline_cli(
     }
 
     // Each gene is independent (own tabix slice → pipeline → output dir), so fan
-    // them out across `jobs` worker threads pulling from a shared index. beagle-rs
-    // runs single-threaded per gene (nthreads=1), so N genes saturate N cores.
+    // them out across `jobs` worker threads pulling from a shared index.
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     let genes = Arc::new(gene_list);
